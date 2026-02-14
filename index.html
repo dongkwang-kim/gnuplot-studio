@@ -269,6 +269,7 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
             </select>
           </div>
           <div class="prop-row"><label>Box</label><input type="checkbox" id="key-box" checked></div>
+          <div class="prop-row"><label>Horizontal</label><input type="checkbox" id="key-horiz"></div>
           <div class="prop-row"><label>Font Size</label><input type="number" id="key-fontsize" value="11" min="6" max="36"></div>
         </div>
       </div>
@@ -346,7 +347,7 @@ const state = {
   labelFontSize: 14,
   xaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
   yaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
-  key: { show: true, pos: 'top-right', box: true, fontSize: 11, x: null, y: null },
+  key: { show: true, pos: 'top-right', box: true, fontSize: 11, horizontal: false, x: null, y: null },
   annotations: [], // [{text, x, y, fontSize, color}]
   customCommands: '',
   plots: [],
@@ -766,10 +767,29 @@ function render() {
   if (state.key.show && state.plots.some(p => p.visible)) {
     const visPlots = state.plots.filter(p => p.visible);
     const fontSize = state.key.fontSize;
+    const horiz = state.key.horizontal;
     ctx.font = `${fontSize}px sans-serif`;
-    const maxTextW = Math.max(...visPlots.map(p => ctx.measureText(p.name).width));
-    const legendW = maxTextW + 40;
-    const legendH = visPlots.length * (fontSize + 6) + 10;
+
+    const swatchW = 22; // width of the line swatch
+    const swatchGap = 6; // gap between swatch and text
+    const entryPadX = 12; // padding between entries (horizontal mode)
+    const entryPadY = fontSize + 6; // row height (vertical mode)
+    const boxPad = 5; // internal padding of legend box
+
+    // Measure each entry width: swatch + gap + text
+    const entryWidths = visPlots.map(p => swatchW + swatchGap + ctx.measureText(p.name).width);
+
+    let legendW, legendH;
+    if (horiz) {
+      // All entries in a single row
+      legendW = entryWidths.reduce((s, w) => s + w + entryPadX, 0) - entryPadX + boxPad * 2;
+      legendH = fontSize + boxPad * 2 + 4;
+    } else {
+      // Vertical stack
+      legendW = Math.max(...entryWidths) + boxPad * 2;
+      legendH = visPlots.length * entryPadY + boxPad * 2 - 2;
+    }
+
     let lx, ly;
     const pad = 10;
     switch (state.key.pos) {
@@ -793,21 +813,51 @@ function render() {
       ctx.lineWidth = 0.5;
       ctx.strokeRect(lx, ly, legendW, legendH);
     }
-    visPlots.forEach((p, i) => {
-      const ey = ly + 8 + i * (fontSize + 6);
-      // Color swatch line
-      ctx.strokeStyle = p.color;
-      ctx.fillStyle = p.color;
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(lx + 6, ey + fontSize / 2); ctx.lineTo(lx + 22, ey + fontSize / 2); ctx.stroke();
-      drawPoint(lx + 14, ey + fontSize / 2, p.pointType, 5, p.color);
-      // Text
-      ctx.fillStyle = '#333';
-      ctx.font = `${fontSize}px sans-serif`;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(p.name, lx + 28, ey);
-    });
+
+    if (horiz) {
+      // Horizontal layout: entries side by side
+      let cx = lx + boxPad;
+      const cy = ly + boxPad + 2;
+      visPlots.forEach((p, i) => {
+        // Swatch line
+        ctx.strokeStyle = p.color;
+        ctx.fillStyle = p.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + fontSize / 2);
+        ctx.lineTo(cx + swatchW, cy + fontSize / 2);
+        ctx.stroke();
+        drawPoint(cx + swatchW / 2, cy + fontSize / 2, p.pointType, 5, p.color);
+        // Text
+        ctx.fillStyle = '#333';
+        ctx.font = `${fontSize}px sans-serif`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(p.name, cx + swatchW + swatchGap, cy);
+        cx += entryWidths[i] + entryPadX;
+      });
+    } else {
+      // Vertical layout: entries stacked
+      visPlots.forEach((p, i) => {
+        const ex = lx + boxPad;
+        const ey = ly + boxPad + i * entryPadY;
+        // Swatch line
+        ctx.strokeStyle = p.color;
+        ctx.fillStyle = p.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(ex, ey + fontSize / 2);
+        ctx.lineTo(ex + swatchW, ey + fontSize / 2);
+        ctx.stroke();
+        drawPoint(ex + swatchW / 2, ey + fontSize / 2, p.pointType, 5, p.color);
+        // Text
+        ctx.fillStyle = '#333';
+        ctx.font = `${fontSize}px sans-serif`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(p.name, ex + swatchW + swatchGap, ey);
+      });
+    }
   }
 }
 
@@ -902,6 +952,7 @@ function syncPropsToState() {
   state.key.show = $('key-show').checked;
   state.key.pos = $('key-pos').value;
   state.key.box = $('key-box').checked;
+  state.key.horizontal = $('key-horiz').checked;
   state.key.fontSize = +$('key-fontsize').value;
   // Enable/disable axis range inputs
   $('xaxis-min').disabled = state.xaxis.auto;
@@ -936,6 +987,7 @@ function syncStateToProps() {
   $('key-show').checked = state.key.show;
   $('key-pos').value = state.key.pos;
   $('key-box').checked = state.key.box;
+  $('key-horiz').checked = state.key.horizontal;
   $('key-fontsize').value = state.key.fontSize;
   $('xaxis-min').disabled = state.xaxis.auto;
   $('xaxis-max').disabled = state.xaxis.auto;
@@ -1406,6 +1458,7 @@ function generateGnuplotScript() {
       'outside-right': 'outside right top',
     };
     let keyLine = `set key ${posMap[state.key.pos] || 'top right'}`;
+    if (state.key.horizontal) keyLine += ' horizontal';
     if (state.key.box) keyLine += ' box';
     keyLine += ` font ",${state.key.fontSize}"`;
     lines.push(keyLine);
