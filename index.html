@@ -1,0 +1,1780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gnuplot Studio</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; color: #e0e0e0; background: #1e1e1e; }
+
+/* Layout */
+#app { display: flex; flex-direction: column; height: 100%; }
+
+#toolbar {
+  height: 40px; background: #2d2d2d; border-bottom: 1px solid #3e3e3e;
+  display: flex; align-items: center; padding: 0 12px; gap: 6px; flex-shrink: 0;
+}
+#toolbar .brand { font-weight: 600; font-size: 14px; color: #9cdcfe; margin-right: 12px; letter-spacing: 0.5px; }
+.tb-btn {
+  background: #3e3e3e; border: 1px solid #555; color: #ddd; padding: 4px 10px;
+  border-radius: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;
+}
+.tb-btn:hover { background: #505050; }
+.tb-btn.primary { background: #264f78; border-color: #3a7cc8; }
+.tb-btn.primary:hover { background: #365f8a; }
+.tb-sep { width: 1px; height: 20px; background: #555; margin: 0 4px; }
+
+#workspace { display: flex; flex: 1; overflow: hidden; }
+
+/* Left panel */
+#left-panel {
+  width: 240px; background: #252526; border-right: 1px solid #3e3e3e;
+  display: flex; flex-direction: column; flex-shrink: 0;
+}
+.panel-header {
+  padding: 8px 12px; font-weight: 600; font-size: 11px; text-transform: uppercase;
+  color: #888; border-bottom: 1px solid #3e3e3e; display: flex; justify-content: space-between; align-items: center;
+}
+.panel-header button { background: none; border: none; color: #9cdcfe; cursor: pointer; font-size: 16px; line-height: 1; }
+.panel-header button:hover { color: #fff; }
+
+#plot-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.plot-item {
+  padding: 6px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px;
+  border-left: 3px solid transparent;
+}
+.plot-item:hover { background: #2a2d2e; }
+.plot-item.selected { background: #37373d; border-left-color: #9cdcfe; }
+.plot-item .swatch { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+.plot-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plot-item .remove-btn { background: none; border: none; color: #666; cursor: pointer; font-size: 14px; }
+.plot-item .remove-btn:hover { color: #e55; }
+
+/* Data editor (bottom of left panel) */
+#data-section { border-top: 1px solid #3e3e3e; display: flex; flex-direction: column; max-height: 50%; }
+#data-editor-wrap { flex: 1; overflow: auto; }
+#data-editor {
+  width: 100%; background: #1e1e1e; color: #d4d4d4; border: none; padding: 8px;
+  font-family: 'Consolas', 'Monaco', monospace; font-size: 12px; resize: none;
+  min-height: 120px;
+}
+
+/* Canvas area */
+#canvas-area {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  background: #1a1a1a; overflow: auto; position: relative;
+}
+#plot-canvas { box-shadow: 0 2px 24px rgba(0,0,0,0.5); cursor: crosshair; }
+
+/* Margin drag handles (overlaid on canvas) */
+.margin-handle {
+  position: absolute; background: rgba(100,149,237,0.0); z-index: 10;
+}
+.margin-handle:hover { background: rgba(100,149,237,0.15); }
+.margin-handle.dragging { background: rgba(100,149,237,0.25); }
+.margin-handle.h-top, .margin-handle.h-bottom { cursor: ns-resize; }
+.margin-handle.h-left, .margin-handle.h-right { cursor: ew-resize; }
+
+/* Right panel */
+#right-panel {
+  width: 280px; background: #252526; border-left: 1px solid #3e3e3e;
+  display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
+}
+
+/* Property sections */
+.prop-section { border-bottom: 1px solid #3e3e3e; }
+.prop-section-title {
+  padding: 8px 12px; font-weight: 600; font-size: 11px; text-transform: uppercase;
+  color: #888; cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+}
+.prop-section-title:hover { color: #aaa; }
+.prop-section-body { padding: 8px 12px; }
+.prop-row { display: flex; align-items: center; margin-bottom: 6px; gap: 6px; }
+.prop-row label { width: 70px; flex-shrink: 0; color: #999; font-size: 11px; }
+.prop-row input[type="text"], .prop-row input[type="number"], .prop-row select {
+  flex: 1; background: #1e1e1e; border: 1px solid #3e3e3e; color: #ddd; padding: 3px 6px;
+  border-radius: 3px; font-size: 12px; min-width: 0;
+}
+.prop-row input[type="number"] { width: 60px; flex: 0 0 60px; }
+.prop-row input[type="color"] { width: 28px; height: 24px; padding: 0; border: 1px solid #3e3e3e; border-radius: 3px; background: none; cursor: pointer; }
+.prop-row input:focus, .prop-row select:focus { border-color: #9cdcfe; outline: none; }
+
+/* Inline number with drag */
+.drag-number {
+  display: inline-flex; align-items: center; background: #1e1e1e; border: 1px solid #3e3e3e;
+  border-radius: 3px; padding: 2px 4px; cursor: ew-resize; user-select: none; min-width: 50px;
+  font-size: 12px; color: #ddd; justify-content: center;
+}
+.drag-number:hover { border-color: #666; }
+.drag-number.active { border-color: #9cdcfe; }
+
+/* Checkbox */
+.prop-row input[type="checkbox"] { accent-color: #9cdcfe; }
+
+/* Modal overlay */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6); z-index: 100; display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  background: #2d2d2d; border: 1px solid #555; border-radius: 8px; padding: 20px;
+  min-width: 500px; max-width: 80vw; max-height: 80vh; overflow: auto;
+}
+.modal h3 { margin-bottom: 12px; color: #e0e0e0; font-size: 15px; }
+.modal textarea {
+  width: 100%; height: 300px; background: #1e1e1e; color: #d4d4d4; border: 1px solid #3e3e3e;
+  font-family: 'Consolas', monospace; font-size: 12px; padding: 8px; border-radius: 4px; resize: vertical;
+}
+.modal-actions { display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end; }
+
+/* Tooltip */
+#tooltip {
+  position: absolute; background: rgba(30,30,30,0.92); color: #eee; padding: 5px 8px;
+  border-radius: 4px; font-size: 11px; pointer-events: none; z-index: 50;
+  white-space: nowrap; border: 1px solid #555; display: none;
+  font-family: 'Consolas', monospace;
+}
+
+/* Zoom selection rect */
+#zoom-rect {
+  position: absolute; border: 1px dashed rgba(100,149,237,0.8); background: rgba(100,149,237,0.1);
+  pointer-events: none; z-index: 20; display: none;
+}
+
+/* Section collapse */
+.prop-section-body.collapsed { display: none; }
+.prop-section-title .collapse-arrow { transition: transform 0.15s; display: inline-block; font-size: 10px; }
+.prop-section-title .collapse-arrow.collapsed { transform: rotate(-90deg); }
+
+/* Status bar */
+#status-bar {
+  height: 22px; background: #007acc; color: #fff; display: flex; align-items: center;
+  padding: 0 12px; font-size: 11px; flex-shrink: 0;
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Toolbar -->
+  <div id="toolbar">
+    <span class="brand">Gnuplot Studio</span>
+    <button class="tb-btn primary" onclick="addPlot()">+ Data</button>
+    <button class="tb-btn primary" onclick="addFunctionPlot()">+ f(x)</button>
+    <button class="tb-btn" onclick="duplicatePlot()">Dup</button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" onclick="showExportModal()">Export .gp</button>
+    <button class="tb-btn" onclick="exportPNG()">Export PNG</button>
+    <button class="tb-btn" onclick="showImportModal()">Import Data</button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" onclick="undo()" title="Ctrl+Z">Undo</button>
+    <button class="tb-btn" onclick="redo()" title="Ctrl+Y">Redo</button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" onclick="saveProject()">Save</button>
+    <button class="tb-btn" onclick="loadProject()">Load</button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" onclick="resetZoom()">Fit</button>
+  </div>
+
+  <!-- Workspace -->
+  <div id="workspace">
+    <!-- Left: Plot list + Data -->
+    <div id="left-panel">
+      <div class="panel-header">
+        Plots
+        <button onclick="addPlot()" title="Add plot">+</button>
+      </div>
+      <div id="plot-list"></div>
+      <div id="data-section">
+        <div class="panel-header">Data</div>
+        <div id="data-editor-wrap">
+          <textarea id="data-editor" placeholder="# Enter data: x y&#10;1 2&#10;2 4&#10;3 1&#10;4 5" spellcheck="false"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center: Canvas -->
+    <div id="canvas-area">
+      <canvas id="plot-canvas"></canvas>
+      <div id="tooltip"></div>
+      <div id="zoom-rect"></div>
+    </div>
+
+    <!-- Right: Properties -->
+    <div id="right-panel">
+      <!-- Figure section -->
+      <div class="prop-section">
+        <div class="prop-section-title">Figure</div>
+        <div class="prop-section-body">
+          <div class="prop-row">
+            <label>Width</label>
+            <input type="number" id="fig-w" value="800" min="200" max="3000" step="10">
+            <label style="width:auto">H</label>
+            <input type="number" id="fig-h" value="600" min="150" max="2000" step="10">
+          </div>
+          <div class="prop-row">
+            <label>BG Color</label>
+            <input type="color" id="fig-bg" value="#ffffff">
+          </div>
+        </div>
+      </div>
+
+      <!-- Margins section -->
+      <div class="prop-section">
+        <div class="prop-section-title">Margins <span style="font-weight:normal;color:#666;font-size:10px">(drag on canvas)</span></div>
+        <div class="prop-section-body">
+          <div class="prop-row">
+            <label>Top</label><input type="number" id="m-top" value="60" min="0" max="400">
+            <label style="width:auto">Bottom</label><input type="number" id="m-bottom" value="60" min="0" max="400">
+          </div>
+          <div class="prop-row">
+            <label>Left</label><input type="number" id="m-left" value="70" min="0" max="400">
+            <label style="width:auto">Right</label><input type="number" id="m-right" value="40" min="0" max="400">
+          </div>
+        </div>
+      </div>
+
+      <!-- Title & Labels -->
+      <div class="prop-section">
+        <div class="prop-section-title">Labels</div>
+        <div class="prop-section-body">
+          <div class="prop-row"><label>Title</label><input type="text" id="lbl-title" placeholder="Graph title"></div>
+          <div class="prop-row"><label>X Label</label><input type="text" id="lbl-xlabel" placeholder="X axis"></div>
+          <div class="prop-row"><label>Y Label</label><input type="text" id="lbl-ylabel" placeholder="Y axis"></div>
+          <div class="prop-row"><label>Font Size</label><input type="number" id="lbl-fontsize" value="14" min="6" max="48"></div>
+        </div>
+      </div>
+
+      <!-- Axis section -->
+      <div class="prop-section">
+        <div class="prop-section-title">X Axis</div>
+        <div class="prop-section-body">
+          <div class="prop-row"><label>Auto</label><input type="checkbox" id="xaxis-auto" checked></div>
+          <div class="prop-row"><label>Min</label><input type="number" id="xaxis-min" step="any" disabled><label style="width:auto">Max</label><input type="number" id="xaxis-max" step="any" disabled></div>
+          <div class="prop-row"><label>Log Scale</label><input type="checkbox" id="xaxis-log"></div>
+          <div class="prop-row"><label>Grid</label><input type="checkbox" id="xaxis-grid" checked></div>
+        </div>
+      </div>
+      <div class="prop-section">
+        <div class="prop-section-title">Y Axis</div>
+        <div class="prop-section-body">
+          <div class="prop-row"><label>Auto</label><input type="checkbox" id="yaxis-auto" checked></div>
+          <div class="prop-row"><label>Min</label><input type="number" id="yaxis-min" step="any" disabled><label style="width:auto">Max</label><input type="number" id="yaxis-max" step="any" disabled></div>
+          <div class="prop-row"><label>Log Scale</label><input type="checkbox" id="yaxis-log"></div>
+          <div class="prop-row"><label>Grid</label><input type="checkbox" id="yaxis-grid" checked></div>
+        </div>
+      </div>
+
+      <!-- Key/Legend -->
+      <div class="prop-section">
+        <div class="prop-section-title">Legend (Key)</div>
+        <div class="prop-section-body">
+          <div class="prop-row"><label>Show</label><input type="checkbox" id="key-show" checked></div>
+          <div class="prop-row">
+            <label>Position</label>
+            <select id="key-pos">
+              <option value="top-right">Top Right</option>
+              <option value="top-left">Top Left</option>
+              <option value="bottom-right">Bottom Right</option>
+              <option value="bottom-left">Bottom Left</option>
+              <option value="outside-right">Outside Right</option>
+            </select>
+          </div>
+          <div class="prop-row"><label>Box</label><input type="checkbox" id="key-box" checked></div>
+          <div class="prop-row"><label>Font Size</label><input type="number" id="key-fontsize" value="11" min="6" max="36"></div>
+        </div>
+      </div>
+
+      <!-- Selected plot properties (dynamic) -->
+      <div class="prop-section" id="plot-props-section" style="display:none">
+        <div class="prop-section-title">Plot Style</div>
+        <div class="prop-section-body" id="plot-props"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div id="status-bar">
+    <span id="status-text">Ready</span>
+    <span style="flex:1"></span>
+    <span id="cursor-pos"></span>
+  </div>
+</div>
+
+<!-- Export modal -->
+<div id="export-modal" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h3>Gnuplot Script</h3>
+    <textarea id="export-text" readonly></textarea>
+    <div class="modal-actions">
+      <button class="tb-btn" onclick="copyExport()">Copy to Clipboard</button>
+      <button class="tb-btn" onclick="downloadExport()">Download .gp</button>
+      <button class="tb-btn" onclick="closeModal('export-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import modal -->
+<div id="import-modal" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h3>Import Data</h3>
+    <p style="color:#aaa;margin-bottom:8px;font-size:12px">Paste CSV/TSV data or whitespace-separated columns. First row can be headers.</p>
+    <textarea id="import-text" placeholder="x,y1,y2&#10;1,2.3,4.5&#10;2,3.1,3.8&#10;..."></textarea>
+    <div class="modal-actions">
+      <button class="tb-btn" onclick="document.getElementById('file-input').click()">Load File</button>
+      <input type="file" id="file-input" accept=".csv,.tsv,.dat,.txt" style="display:none" onchange="loadFile(event)">
+      <button class="tb-btn primary" onclick="importData()">Import</button>
+      <button class="tb-btn" onclick="closeModal('import-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// STATE
+// ============================================================
+const COLORS = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'];
+
+const state = {
+  figure: { width: 800, height: 600, bg: '#ffffff' },
+  margin: { top: 60, right: 40, bottom: 60, left: 70 },
+  title: '', xlabel: '', ylabel: '',
+  labelFontSize: 14,
+  xaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
+  yaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
+  key: { show: true, pos: 'top-right', box: true, fontSize: 11, x: null, y: null },
+  plots: [],
+  selectedPlot: -1,
+};
+
+let plotIdCounter = 0;
+
+function createPlot(name) {
+  return {
+    id: plotIdCounter++,
+    name: name || `Plot ${state.plots.length + 1}`,
+    type: 'linespoints', // lines, points, linespoints, boxes, impulses, steps, fillcurves
+    color: COLORS[state.plots.length % COLORS.length],
+    lineWidth: 2,
+    pointSize: 4,
+    pointType: 'circle', // circle, square, triangle, diamond, cross, plus
+    dashType: 'solid', // solid, dashed, dotted, dashdot
+    fillAlpha: 0.3,
+    data: [], // [{x, y}]
+    rawData: '', // text form
+    smooth: 'none', // none, csplines, bezier
+    visible: true,
+    // Function plotting
+    isFunction: false,
+    funcExpr: '', // e.g. "sin(x)", "x**2 + 1"
+    funcXmin: -10,
+    funcXmax: 10,
+    funcSamples: 200,
+    // Error bars
+    hasErrorBars: false, // if true, data has {x, y, yerr}
+  };
+}
+
+// ============================================================
+// CANVAS & RENDERING
+// ============================================================
+const canvas = document.getElementById('plot-canvas');
+const ctx = canvas.getContext('2d');
+
+function getPlotArea() {
+  const m = state.margin;
+  return {
+    x: m.left, y: m.top,
+    w: state.figure.width - m.left - m.right,
+    h: state.figure.height - m.top - m.bottom,
+  };
+}
+
+function computeDataBounds() {
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  for (const p of state.plots) {
+    if (!p.visible) continue;
+    for (const d of p.data) {
+      if (isFinite(d.x)) { xmin = Math.min(xmin, d.x); xmax = Math.max(xmax, d.x); }
+      if (isFinite(d.y)) { ymin = Math.min(ymin, d.y); ymax = Math.max(ymax, d.y); }
+    }
+  }
+  if (!isFinite(xmin)) { xmin = 0; xmax = 10; }
+  if (!isFinite(ymin)) { ymin = 0; ymax = 10; }
+  // Add padding
+  const xpad = (xmax - xmin) * 0.05 || 1;
+  const ypad = (ymax - ymin) * 0.05 || 1;
+  return { xmin: xmin - xpad, xmax: xmax + xpad, ymin: ymin - ypad, ymax: ymax + ypad };
+}
+
+function niceTickStep(range, maxTicks) {
+  const rough = range / maxTicks;
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / pow;
+  let step;
+  if (norm <= 1.5) step = 1;
+  else if (norm <= 3) step = 2;
+  else if (norm <= 7) step = 5;
+  else step = 10;
+  return step * pow;
+}
+
+function generateTicks(min, max, isLog) {
+  if (isLog) {
+    const ticks = [];
+    const start = Math.floor(Math.log10(Math.max(min, 1e-10)));
+    const end = Math.ceil(Math.log10(Math.max(max, 1e-10)));
+    for (let i = start; i <= end; i++) ticks.push(Math.pow(10, i));
+    return ticks;
+  }
+  const range = max - min;
+  const step = niceTickStep(range, 8);
+  const ticks = [];
+  let t = Math.ceil(min / step) * step;
+  while (t <= max + step * 0.001) {
+    ticks.push(t);
+    t += step;
+  }
+  return ticks;
+}
+
+function formatTick(v) {
+  if (Math.abs(v) < 1e-10) return '0';
+  if (Math.abs(v) >= 1e6 || (Math.abs(v) < 0.01 && v !== 0)) return v.toExponential(1);
+  // Remove trailing zeros
+  let s = v.toPrecision(6);
+  if (s.includes('.')) s = s.replace(/\.?0+$/, '');
+  return s;
+}
+
+function dataToCanvas(dx, dy, area, bounds) {
+  const { xmin, xmax, ymin, ymax } = bounds;
+  let nx, ny;
+  if (state.xaxis.log) {
+    nx = (Math.log10(Math.max(dx, 1e-10)) - Math.log10(Math.max(xmin, 1e-10))) /
+         (Math.log10(Math.max(xmax, 1e-10)) - Math.log10(Math.max(xmin, 1e-10)));
+  } else {
+    nx = (dx - xmin) / (xmax - xmin);
+  }
+  if (state.yaxis.log) {
+    ny = (Math.log10(Math.max(dy, 1e-10)) - Math.log10(Math.max(ymin, 1e-10))) /
+         (Math.log10(Math.max(ymax, 1e-10)) - Math.log10(Math.max(ymin, 1e-10)));
+  } else {
+    ny = (dy - ymin) / (ymax - ymin);
+  }
+  return { x: area.x + nx * area.w, y: area.y + area.h - ny * area.h };
+}
+
+function canvasToData(cx, cy, area, bounds) {
+  const { xmin, xmax, ymin, ymax } = bounds;
+  const nx = (cx - area.x) / area.w;
+  const ny = 1 - (cy - area.y) / area.h;
+  return { x: xmin + nx * (xmax - xmin), y: ymin + ny * (ymax - ymin) };
+}
+
+function drawPoint(cx, cy, type, size, color) {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  const r = size / 2;
+  switch (type) {
+    case 'circle':
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); break;
+    case 'square':
+      ctx.fillRect(cx - r, cy - r, size, size); break;
+    case 'triangle':
+      ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx - r, cy + r); ctx.lineTo(cx + r, cy + r); ctx.closePath(); ctx.fill(); break;
+    case 'diamond':
+      ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); ctx.closePath(); ctx.fill(); break;
+    case 'cross':
+      ctx.beginPath(); ctx.moveTo(cx - r, cy - r); ctx.lineTo(cx + r, cy + r); ctx.moveTo(cx + r, cy - r); ctx.lineTo(cx - r, cy + r); ctx.stroke(); break;
+    case 'plus':
+      ctx.beginPath(); ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy); ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r); ctx.stroke(); break;
+    default:
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function setDash(dashType) {
+  switch (dashType) {
+    case 'dashed': ctx.setLineDash([8, 4]); break;
+    case 'dotted': ctx.setLineDash([2, 4]); break;
+    case 'dashdot': ctx.setLineDash([8, 4, 2, 4]); break;
+    default: ctx.setLineDash([]);
+  }
+}
+
+function render() {
+  const W = state.figure.width;
+  const H = state.figure.height;
+  canvas.width = W;
+  canvas.height = H;
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  ctx.fillStyle = state.figure.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  const area = getPlotArea();
+
+  // Compute bounds
+  let bounds;
+  if (state.xaxis.auto || state.yaxis.auto) {
+    const auto = computeDataBounds();
+    bounds = {
+      xmin: state.xaxis.auto ? auto.xmin : state.xaxis.min,
+      xmax: state.xaxis.auto ? auto.xmax : state.xaxis.max,
+      ymin: state.yaxis.auto ? auto.ymin : state.yaxis.min,
+      ymax: state.yaxis.auto ? auto.ymax : state.yaxis.max,
+    };
+  } else {
+    bounds = { xmin: state.xaxis.min, xmax: state.xaxis.max, ymin: state.yaxis.min, ymax: state.yaxis.max };
+  }
+
+  // Store for mouse interaction
+  state._bounds = bounds;
+  state._area = area;
+
+  // Plot area background
+  ctx.fillStyle = '#fafafa';
+  ctx.fillRect(area.x, area.y, area.w, area.h);
+
+  // Grid
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(area.x, area.y, area.w, area.h);
+  ctx.clip();
+
+  if (state.xaxis.grid) {
+    const xticks = generateTicks(bounds.xmin, bounds.xmax, state.xaxis.log);
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 0.5;
+    for (const t of xticks) {
+      const p = dataToCanvas(t, bounds.ymin, area, bounds);
+      ctx.beginPath(); ctx.moveTo(p.x, area.y); ctx.lineTo(p.x, area.y + area.h); ctx.stroke();
+    }
+  }
+  if (state.yaxis.grid) {
+    const yticks = generateTicks(bounds.ymin, bounds.ymax, state.yaxis.log);
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 0.5;
+    for (const t of yticks) {
+      const p = dataToCanvas(bounds.xmin, t, area, bounds);
+      ctx.beginPath(); ctx.moveTo(area.x, p.y); ctx.lineTo(area.x + area.w, p.y); ctx.stroke();
+    }
+  }
+
+  // Plot data
+  for (const plot of state.plots) {
+    if (!plot.visible || plot.data.length === 0) continue;
+    const pts = plot.data.map(d => dataToCanvas(d.x, d.y, area, bounds));
+    ctx.strokeStyle = plot.color;
+    ctx.fillStyle = plot.color;
+
+    // Draw based on type
+    if (plot.type === 'lines' || plot.type === 'linespoints') {
+      setDash(plot.dashType);
+      ctx.lineWidth = plot.lineWidth;
+      ctx.beginPath();
+      let first = true;
+      for (const p of pts) {
+        if (first) { ctx.moveTo(p.x, p.y); first = false; }
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (plot.type === 'steps') {
+      setDash(plot.dashType);
+      ctx.lineWidth = plot.lineWidth;
+      ctx.beginPath();
+      for (let i = 0; i < pts.length; i++) {
+        if (i === 0) ctx.moveTo(pts[i].x, pts[i].y);
+        else {
+          ctx.lineTo(pts[i].x, pts[i - 1].y);
+          ctx.lineTo(pts[i].x, pts[i].y);
+        }
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (plot.type === 'points' || plot.type === 'linespoints') {
+      for (const p of pts) drawPoint(p.x, p.y, plot.pointType, plot.pointSize, plot.color);
+    }
+
+    // Error bars
+    if (plot.hasErrorBars) {
+      ctx.strokeStyle = plot.color;
+      ctx.lineWidth = 1;
+      const capW = 4;
+      for (let i = 0; i < plot.data.length; i++) {
+        const d = plot.data[i];
+        if (d.yerr === undefined) continue;
+        const top = dataToCanvas(d.x, d.y + d.yerr, area, bounds);
+        const bot = dataToCanvas(d.x, d.y - d.yerr, area, bounds);
+        ctx.beginPath();
+        ctx.moveTo(top.x, top.y); ctx.lineTo(bot.x, bot.y);
+        ctx.moveTo(top.x - capW, top.y); ctx.lineTo(top.x + capW, top.y);
+        ctx.moveTo(bot.x - capW, bot.y); ctx.lineTo(bot.x + capW, bot.y);
+        ctx.stroke();
+      }
+    }
+
+    if (plot.type === 'boxes') {
+      const barWidth = pts.length > 1 ? Math.max(4, Math.abs(pts[1].x - pts[0].x) * 0.7) : 30;
+      const baseline = dataToCanvas(0, Math.max(bounds.ymin, 0), area, bounds);
+      ctx.globalAlpha = plot.fillAlpha;
+      for (const p of pts) {
+        const h = baseline.y - p.y;
+        ctx.fillRect(p.x - barWidth / 2, p.y, barWidth, h);
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1;
+      for (const p of pts) {
+        const h = baseline.y - p.y;
+        ctx.strokeRect(p.x - barWidth / 2, p.y, barWidth, h);
+      }
+    }
+
+    if (plot.type === 'impulses') {
+      ctx.lineWidth = plot.lineWidth;
+      const baseline = dataToCanvas(0, Math.max(bounds.ymin, 0), area, bounds);
+      for (const p of pts) {
+        ctx.beginPath(); ctx.moveTo(p.x, baseline.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+      }
+    }
+
+    if (plot.type === 'fillcurves') {
+      const baseline = dataToCanvas(0, Math.max(bounds.ymin, 0), area, bounds);
+      ctx.globalAlpha = plot.fillAlpha;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, baseline.y);
+      for (const p of pts) ctx.lineTo(p.x, p.y);
+      ctx.lineTo(pts[pts.length - 1].x, baseline.y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = plot.lineWidth;
+      ctx.beginPath();
+      let first = true;
+      for (const p of pts) {
+        if (first) { ctx.moveTo(p.x, p.y); first = false; } else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  // Axes border
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(area.x, area.y, area.w, area.h);
+
+  // X ticks + labels
+  const xticks = generateTicks(bounds.xmin, bounds.xmax, state.xaxis.log);
+  ctx.fillStyle = '#333';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (const t of xticks) {
+    const p = dataToCanvas(t, bounds.ymin, area, bounds);
+    if (p.x < area.x || p.x > area.x + area.w) continue;
+    ctx.beginPath(); ctx.moveTo(p.x, area.y + area.h); ctx.lineTo(p.x, area.y + area.h + 5); ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillText(formatTick(t), p.x, area.y + area.h + 7);
+  }
+
+  // Y ticks + labels
+  const yticks = generateTicks(bounds.ymin, bounds.ymax, state.yaxis.log);
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (const t of yticks) {
+    const p = dataToCanvas(bounds.xmin, t, area, bounds);
+    if (p.y < area.y || p.y > area.y + area.h) continue;
+    ctx.beginPath(); ctx.moveTo(area.x, p.y); ctx.lineTo(area.x - 5, p.y); ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillText(formatTick(t), area.x - 8, p.y);
+  }
+
+  // Title
+  if (state.title) {
+    ctx.fillStyle = '#222';
+    ctx.font = `bold ${state.labelFontSize + 2}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(state.title, area.x + area.w / 2, area.y - 10);
+  }
+
+  // X label
+  if (state.xlabel) {
+    ctx.fillStyle = '#333';
+    ctx.font = `${state.labelFontSize}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(state.xlabel, area.x + area.w / 2, area.y + area.h + 28);
+  }
+
+  // Y label
+  if (state.ylabel) {
+    ctx.save();
+    ctx.fillStyle = '#333';
+    ctx.font = `${state.labelFontSize}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.translate(area.x - 45, area.y + area.h / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(state.ylabel, 0, 0);
+    ctx.restore();
+  }
+
+  // Legend
+  if (state.key.show && state.plots.some(p => p.visible)) {
+    const visPlots = state.plots.filter(p => p.visible);
+    const fontSize = state.key.fontSize;
+    ctx.font = `${fontSize}px sans-serif`;
+    const maxTextW = Math.max(...visPlots.map(p => ctx.measureText(p.name).width));
+    const legendW = maxTextW + 40;
+    const legendH = visPlots.length * (fontSize + 6) + 10;
+    let lx, ly;
+    const pad = 10;
+    switch (state.key.pos) {
+      case 'top-left': lx = area.x + pad; ly = area.y + pad; break;
+      case 'top-right': lx = area.x + area.w - legendW - pad; ly = area.y + pad; break;
+      case 'bottom-left': lx = area.x + pad; ly = area.y + area.h - legendH - pad; break;
+      case 'bottom-right': lx = area.x + area.w - legendW - pad; ly = area.y + area.h - legendH - pad; break;
+      case 'outside-right': lx = area.x + area.w + 10; ly = area.y + pad; break;
+      default: lx = area.x + area.w - legendW - pad; ly = area.y + pad;
+    }
+    // Use custom position if dragged
+    if (state.key.x !== null) { lx = state.key.x; ly = state.key.y; }
+
+    // Store for hit testing
+    state._keyRect = { x: lx, y: ly, w: legendW, h: legendH };
+
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillRect(lx, ly, legendW, legendH);
+    if (state.key.box) {
+      ctx.strokeStyle = '#999';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(lx, ly, legendW, legendH);
+    }
+    visPlots.forEach((p, i) => {
+      const ey = ly + 8 + i * (fontSize + 6);
+      // Color swatch line
+      ctx.strokeStyle = p.color;
+      ctx.fillStyle = p.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(lx + 6, ey + fontSize / 2); ctx.lineTo(lx + 22, ey + fontSize / 2); ctx.stroke();
+      drawPoint(lx + 14, ey + fontSize / 2, p.pointType, 5, p.color);
+      // Text
+      ctx.fillStyle = '#333';
+      ctx.font = `${fontSize}px sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(p.name, lx + 28, ey);
+    });
+  }
+}
+
+// ============================================================
+// DATA PARSING
+// ============================================================
+function parseData(text) {
+  const lines = text.split('\n');
+  const data = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const parts = trimmed.split(/[,\t\s]+/).map(Number);
+    if (parts.length >= 3 && isFinite(parts[0]) && isFinite(parts[1]) && isFinite(parts[2])) {
+      data.push({ x: parts[0], y: parts[1], yerr: parts[2] });
+    } else if (parts.length >= 2 && isFinite(parts[0]) && isFinite(parts[1])) {
+      data.push({ x: parts[0], y: parts[1] });
+    }
+  }
+  return data;
+}
+
+// ============================================================
+// FUNCTION EVALUATION (safe math expression)
+// ============================================================
+function evalFunction(expr, xmin, xmax, samples) {
+  const data = [];
+  const step = (xmax - xmin) / (samples - 1);
+  // Build a safe evaluator using Math functions
+  const safeExpr = expr
+    .replace(/\bsin\b/g, 'Math.sin')
+    .replace(/\bcos\b/g, 'Math.cos')
+    .replace(/\btan\b/g, 'Math.tan')
+    .replace(/\babs\b/g, 'Math.abs')
+    .replace(/\bsqrt\b/g, 'Math.sqrt')
+    .replace(/\blog\b/g, 'Math.log')
+    .replace(/\blog10\b/g, 'Math.log10')
+    .replace(/\blog2\b/g, 'Math.log2')
+    .replace(/\bexp\b/g, 'Math.exp')
+    .replace(/\bfloor\b/g, 'Math.floor')
+    .replace(/\bceil\b/g, 'Math.ceil')
+    .replace(/\bpow\b/g, 'Math.pow')
+    .replace(/\bPI\b/g, 'Math.PI')
+    .replace(/\bpi\b/g, 'Math.PI')
+    .replace(/\be\b/g, 'Math.E')
+    .replace(/\*\*/g, '**');
+  try {
+    const fn = new Function('x', 'return ' + safeExpr);
+    for (let i = 0; i < samples; i++) {
+      const x = xmin + i * step;
+      const y = fn(x);
+      if (isFinite(y)) data.push({ x, y });
+    }
+  } catch(e) {
+    // Return empty on error
+  }
+  return data;
+}
+
+// ============================================================
+// UI BINDINGS
+// ============================================================
+const $ = id => document.getElementById(id);
+const dataEditor = $('data-editor');
+
+function syncPropsToState() {
+  state.figure.width = +$('fig-w').value;
+  state.figure.height = +$('fig-h').value;
+  state.figure.bg = $('fig-bg').value;
+  state.margin.top = +$('m-top').value;
+  state.margin.bottom = +$('m-bottom').value;
+  state.margin.left = +$('m-left').value;
+  state.margin.right = +$('m-right').value;
+  state.title = $('lbl-title').value;
+  state.xlabel = $('lbl-xlabel').value;
+  state.ylabel = $('lbl-ylabel').value;
+  state.labelFontSize = +$('lbl-fontsize').value;
+  state.xaxis.auto = $('xaxis-auto').checked;
+  state.xaxis.min = +$('xaxis-min').value;
+  state.xaxis.max = +$('xaxis-max').value;
+  state.xaxis.log = $('xaxis-log').checked;
+  state.xaxis.grid = $('xaxis-grid').checked;
+  state.yaxis.auto = $('yaxis-auto').checked;
+  state.yaxis.min = +$('yaxis-min').value;
+  state.yaxis.max = +$('yaxis-max').value;
+  state.yaxis.log = $('yaxis-log').checked;
+  state.yaxis.grid = $('yaxis-grid').checked;
+  state.key.show = $('key-show').checked;
+  state.key.pos = $('key-pos').value;
+  state.key.box = $('key-box').checked;
+  state.key.fontSize = +$('key-fontsize').value;
+  // Enable/disable axis range inputs
+  $('xaxis-min').disabled = state.xaxis.auto;
+  $('xaxis-max').disabled = state.xaxis.auto;
+  $('yaxis-min').disabled = state.yaxis.auto;
+  $('yaxis-max').disabled = state.yaxis.auto;
+}
+
+function syncStateToProps() {
+  $('fig-w').value = state.figure.width;
+  $('fig-h').value = state.figure.height;
+  $('fig-bg').value = state.figure.bg;
+  $('m-top').value = state.margin.top;
+  $('m-bottom').value = state.margin.bottom;
+  $('m-left').value = state.margin.left;
+  $('m-right').value = state.margin.right;
+  $('lbl-title').value = state.title;
+  $('lbl-xlabel').value = state.xlabel;
+  $('lbl-ylabel').value = state.ylabel;
+  $('lbl-fontsize').value = state.labelFontSize;
+  $('xaxis-auto').checked = state.xaxis.auto;
+  $('xaxis-min').value = state.xaxis.min;
+  $('xaxis-max').value = state.xaxis.max;
+  $('xaxis-log').checked = state.xaxis.log;
+  $('xaxis-grid').checked = state.xaxis.grid;
+  $('yaxis-auto').checked = state.yaxis.auto;
+  $('yaxis-min').value = state.yaxis.min;
+  $('yaxis-max').value = state.yaxis.max;
+  $('yaxis-log').checked = state.yaxis.log;
+  $('yaxis-grid').checked = state.yaxis.grid;
+  $('key-show').checked = state.key.show;
+  $('key-pos').value = state.key.pos;
+  $('key-box').checked = state.key.box;
+  $('key-fontsize').value = state.key.fontSize;
+  $('xaxis-min').disabled = state.xaxis.auto;
+  $('xaxis-max').disabled = state.xaxis.auto;
+  $('yaxis-min').disabled = state.yaxis.auto;
+  $('yaxis-max').disabled = state.yaxis.auto;
+}
+
+// Listen to all property inputs
+document.querySelectorAll('#right-panel input, #right-panel select').forEach(el => {
+  el.addEventListener('input', () => { syncPropsToState(); render(); });
+  el.addEventListener('change', () => { syncPropsToState(); render(); });
+});
+
+// Data editor -> update selected plot
+dataEditor.addEventListener('input', () => {
+  if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
+    const plot = state.plots[state.selectedPlot];
+    plot.rawData = dataEditor.value;
+    plot.data = parseData(dataEditor.value);
+    render();
+  }
+});
+
+// ============================================================
+// PLOT LIST UI
+// ============================================================
+function renderPlotList() {
+  const list = $('plot-list');
+  list.innerHTML = '';
+  state.plots.forEach((p, i) => {
+    const item = document.createElement('div');
+    item.className = 'plot-item' + (i === state.selectedPlot ? ' selected' : '');
+    item.innerHTML = `
+      <div class="swatch" style="background:${p.color};opacity:${p.visible ? 1 : 0.3}"></div>
+      <span class="name">${p.name}</span>
+      <button class="remove-btn" title="Remove">&times;</button>
+    `;
+    item.addEventListener('click', (e) => {
+      if (e.target.classList.contains('remove-btn')) {
+        state.plots.splice(i, 1);
+        if (state.selectedPlot >= state.plots.length) state.selectedPlot = state.plots.length - 1;
+        renderPlotList();
+        selectPlot(state.selectedPlot);
+        render();
+        return;
+      }
+      selectPlot(i);
+    });
+    list.appendChild(item);
+  });
+}
+
+function selectPlot(idx) {
+  state.selectedPlot = idx;
+  renderPlotList();
+  if (idx >= 0 && idx < state.plots.length) {
+    const p = state.plots[idx];
+    dataEditor.value = p.rawData;
+    renderPlotProps(p);
+  } else {
+    dataEditor.value = '';
+    $('plot-props-section').style.display = 'none';
+  }
+}
+
+function renderPlotProps(plot) {
+  const section = $('plot-props-section');
+  section.style.display = '';
+  const body = $('plot-props');
+  body.innerHTML = `
+    <div class="prop-row">
+      <label>Name</label>
+      <input type="text" id="pp-name" value="${plot.name}">
+    </div>
+    <div class="prop-row">
+      <label>Type</label>
+      <select id="pp-type">
+        <option value="lines" ${plot.type==='lines'?'selected':''}>Lines</option>
+        <option value="points" ${plot.type==='points'?'selected':''}>Points</option>
+        <option value="linespoints" ${plot.type==='linespoints'?'selected':''}>Lines+Points</option>
+        <option value="boxes" ${plot.type==='boxes'?'selected':''}>Boxes (Bars)</option>
+        <option value="impulses" ${plot.type==='impulses'?'selected':''}>Impulses</option>
+        <option value="steps" ${plot.type==='steps'?'selected':''}>Steps</option>
+        <option value="fillcurves" ${plot.type==='fillcurves'?'selected':''}>Fill Curves</option>
+      </select>
+    </div>
+    <div class="prop-row">
+      <label>Color</label>
+      <input type="color" id="pp-color" value="${plot.color}">
+    </div>
+    <div class="prop-row">
+      <label>Line W</label>
+      <input type="number" id="pp-lw" value="${plot.lineWidth}" min="0.5" max="10" step="0.5">
+    </div>
+    <div class="prop-row">
+      <label>Point Size</label>
+      <input type="number" id="pp-ps" value="${plot.pointSize}" min="1" max="20" step="1">
+    </div>
+    <div class="prop-row">
+      <label>Point</label>
+      <select id="pp-pt">
+        <option value="circle" ${plot.pointType==='circle'?'selected':''}>Circle</option>
+        <option value="square" ${plot.pointType==='square'?'selected':''}>Square</option>
+        <option value="triangle" ${plot.pointType==='triangle'?'selected':''}>Triangle</option>
+        <option value="diamond" ${plot.pointType==='diamond'?'selected':''}>Diamond</option>
+        <option value="cross" ${plot.pointType==='cross'?'selected':''}>Cross</option>
+        <option value="plus" ${plot.pointType==='plus'?'selected':''}>Plus</option>
+      </select>
+    </div>
+    <div class="prop-row">
+      <label>Dash</label>
+      <select id="pp-dash">
+        <option value="solid" ${plot.dashType==='solid'?'selected':''}>Solid</option>
+        <option value="dashed" ${plot.dashType==='dashed'?'selected':''}>Dashed</option>
+        <option value="dotted" ${plot.dashType==='dotted'?'selected':''}>Dotted</option>
+        <option value="dashdot" ${plot.dashType==='dashdot'?'selected':''}>Dash-Dot</option>
+      </select>
+    </div>
+    <div class="prop-row">
+      <label>Fill Alpha</label>
+      <input type="number" id="pp-fa" value="${plot.fillAlpha}" min="0" max="1" step="0.05">
+    </div>
+    <div class="prop-row">
+      <label>Visible</label>
+      <input type="checkbox" id="pp-vis" ${plot.visible?'checked':''}>
+    </div>
+    <div class="prop-row">
+      <label>Error Bars</label>
+      <input type="checkbox" id="pp-errbars" ${plot.hasErrorBars?'checked':''}>
+    </div>
+    <div style="border-top:1px solid #3e3e3e;margin:8px 0;padding-top:8px">
+      <div class="prop-row">
+        <label>Function</label>
+        <input type="checkbox" id="pp-isfunc" ${plot.isFunction?'checked':''}>
+      </div>
+      <div class="prop-row">
+        <label>f(x) =</label>
+        <input type="text" id="pp-funcexpr" value="${plot.funcExpr}" placeholder="sin(x)" ${!plot.isFunction?'disabled':''}>
+      </div>
+      <div class="prop-row">
+        <label>X range</label>
+        <input type="number" id="pp-fxmin" value="${plot.funcXmin}" step="any" style="flex:0 0 50px" ${!plot.isFunction?'disabled':''}>
+        <span style="color:#888">to</span>
+        <input type="number" id="pp-fxmax" value="${plot.funcXmax}" step="any" style="flex:0 0 50px" ${!plot.isFunction?'disabled':''}>
+      </div>
+      <div class="prop-row">
+        <label>Samples</label>
+        <input type="number" id="pp-fsamples" value="${plot.funcSamples}" min="10" max="2000" ${!plot.isFunction?'disabled':''}>
+      </div>
+    </div>
+  `;
+  // Bind plot prop changes
+  body.querySelectorAll('input, select').forEach(el => {
+    el.addEventListener('input', () => syncPlotProps(plot));
+    el.addEventListener('change', () => syncPlotProps(plot));
+  });
+}
+
+function syncPlotProps(plot) {
+  plot.name = $('pp-name').value;
+  plot.type = $('pp-type').value;
+  plot.color = $('pp-color').value;
+  plot.lineWidth = +$('pp-lw').value;
+  plot.pointSize = +$('pp-ps').value;
+  plot.pointType = $('pp-pt').value;
+  plot.dashType = $('pp-dash').value;
+  plot.fillAlpha = +$('pp-fa').value;
+  plot.visible = $('pp-vis').checked;
+  plot.hasErrorBars = $('pp-errbars').checked;
+  plot.isFunction = $('pp-isfunc').checked;
+  plot.funcExpr = $('pp-funcexpr').value;
+  plot.funcXmin = +$('pp-fxmin').value;
+  plot.funcXmax = +$('pp-fxmax').value;
+  plot.funcSamples = +$('pp-fsamples').value;
+  // Enable/disable function fields
+  $('pp-funcexpr').disabled = !plot.isFunction;
+  $('pp-fxmin').disabled = !plot.isFunction;
+  $('pp-fxmax').disabled = !plot.isFunction;
+  $('pp-fsamples').disabled = !plot.isFunction;
+  // Re-evaluate function if enabled
+  if (plot.isFunction && plot.funcExpr) {
+    plot.data = evalFunction(plot.funcExpr, plot.funcXmin, plot.funcXmax, plot.funcSamples);
+  }
+  renderPlotList();
+  render();
+}
+
+// ============================================================
+// ADD PLOT
+// ============================================================
+function addPlot() {
+  const plot = createPlot();
+  // Default sample data
+  plot.rawData = '# x y\n1 2\n2 4\n3 3\n4 7\n5 5';
+  plot.data = parseData(plot.rawData);
+  state.plots.push(plot);
+  selectPlot(state.plots.length - 1);
+  render();
+  renderPlotList();
+  $('status-text').textContent = `Added plot: ${plot.name}`;
+}
+
+function addFunctionPlot() {
+  const plot = createPlot();
+  plot.name = `f${state.plots.length + 1}(x)`;
+  plot.isFunction = true;
+  plot.funcExpr = 'sin(x)';
+  plot.funcXmin = -10;
+  plot.funcXmax = 10;
+  plot.funcSamples = 200;
+  plot.type = 'lines';
+  plot.data = evalFunction(plot.funcExpr, plot.funcXmin, plot.funcXmax, plot.funcSamples);
+  state.plots.push(plot);
+  selectPlot(state.plots.length - 1);
+  render();
+  renderPlotList();
+  $('status-text').textContent = `Added function plot: ${plot.name}`;
+}
+
+// ============================================================
+// CANVAS MOUSE INTERACTIONS
+// ============================================================
+let dragMode = null; // 'legend', 'margin-top', 'margin-bottom', 'margin-left', 'margin-right'
+let dragStart = { x: 0, y: 0 };
+let dragOriginal = {};
+
+canvas.addEventListener('mousedown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  // Check legend drag
+  if (state.key.show && state._keyRect) {
+    const kr = state._keyRect;
+    if (mx >= kr.x && mx <= kr.x + kr.w && my >= kr.y && my <= kr.y + kr.h) {
+      dragMode = 'legend';
+      dragStart = { x: mx, y: my };
+      dragOriginal = { x: kr.x, y: kr.y };
+      return;
+    }
+  }
+
+  // Check margin drag zones (within 8px of each edge)
+  const area = state._area;
+  if (area) {
+    const edge = 10;
+    if (my >= area.y - edge && my <= area.y + edge && mx >= area.x && mx <= area.x + area.w) {
+      dragMode = 'margin-top'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.top }; return;
+    }
+    if (my >= area.y + area.h - edge && my <= area.y + area.h + edge && mx >= area.x && mx <= area.x + area.w) {
+      dragMode = 'margin-bottom'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.bottom }; return;
+    }
+    if (mx >= area.x - edge && mx <= area.x + edge && my >= area.y && my <= area.y + area.h) {
+      dragMode = 'margin-left'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.left }; return;
+    }
+    if (mx >= area.x + area.w - edge && mx <= area.x + area.w + edge && my >= area.y && my <= area.y + area.h) {
+      dragMode = 'margin-right'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.right }; return;
+    }
+  }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  // Update cursor position display
+  if (state._area && state._bounds) {
+    const a = state._area;
+    if (mx >= a.x && mx <= a.x + a.w && my >= a.y && my <= a.y + a.h) {
+      const d = canvasToData(mx, my, a, state._bounds);
+      $('cursor-pos').textContent = `x: ${d.x.toPrecision(4)}  y: ${d.y.toPrecision(4)}`;
+    } else {
+      $('cursor-pos').textContent = '';
+    }
+  }
+
+  // Change cursor near edges
+  if (!dragMode && state._area) {
+    const area = state._area;
+    const edge = 10;
+    if ((my >= area.y - edge && my <= area.y + edge && mx >= area.x && mx <= area.x + area.w) ||
+        (my >= area.y + area.h - edge && my <= area.y + area.h + edge && mx >= area.x && mx <= area.x + area.w)) {
+      canvas.style.cursor = 'ns-resize';
+    } else if ((mx >= area.x - edge && mx <= area.x + edge && my >= area.y && my <= area.y + area.h) ||
+               (mx >= area.x + area.w - edge && mx <= area.x + area.w + edge && my >= area.y && my <= area.y + area.h)) {
+      canvas.style.cursor = 'ew-resize';
+    } else if (state.key.show && state._keyRect) {
+      const kr = state._keyRect;
+      if (mx >= kr.x && mx <= kr.x + kr.w && my >= kr.y && my <= kr.y + kr.h) {
+        canvas.style.cursor = 'move';
+      } else {
+        canvas.style.cursor = 'crosshair';
+      }
+    } else {
+      canvas.style.cursor = 'crosshair';
+    }
+  }
+
+  if (!dragMode) return;
+
+  if (dragMode === 'legend') {
+    state.key.x = dragOriginal.x + (mx - dragStart.x);
+    state.key.y = dragOriginal.y + (my - dragStart.y);
+    render();
+    return;
+  }
+
+  const dy = my - dragStart.y;
+  const dx = mx - dragStart.x;
+  if (dragMode === 'margin-top') {
+    state.margin.top = Math.max(10, dragOriginal.v + dy);
+    $('m-top').value = Math.round(state.margin.top);
+  } else if (dragMode === 'margin-bottom') {
+    state.margin.bottom = Math.max(10, dragOriginal.v - dy);
+    $('m-bottom').value = Math.round(state.margin.bottom);
+  } else if (dragMode === 'margin-left') {
+    state.margin.left = Math.max(10, dragOriginal.v + dx);
+    $('m-left').value = Math.round(state.margin.left);
+  } else if (dragMode === 'margin-right') {
+    state.margin.right = Math.max(10, dragOriginal.v - dx);
+    $('m-right').value = Math.round(state.margin.right);
+  }
+  render();
+});
+
+canvas.addEventListener('mouseup', () => { dragMode = null; });
+canvas.addEventListener('mouseleave', () => { dragMode = null; });
+
+// ============================================================
+// GNUPLOT EXPORT
+// ============================================================
+function generateGnuplotScript() {
+  const lines = [];
+  lines.push('# Generated by Gnuplot Studio');
+  lines.push(`set terminal pngcairo size ${state.figure.width},${state.figure.height} enhanced font "sans,${state.labelFontSize}"`);
+  lines.push('set output "plot.png"');
+  lines.push('');
+
+  if (state.title) lines.push(`set title "${state.title}"`);
+  if (state.xlabel) lines.push(`set xlabel "${state.xlabel}"`);
+  if (state.ylabel) lines.push(`set ylabel "${state.ylabel}"`);
+
+  // Margins (gnuplot uses screen coordinates 0-1)
+  const ml = state.margin.left / state.figure.width;
+  const mr = 1 - state.margin.right / state.figure.width;
+  const mt = 1 - state.margin.top / state.figure.height;
+  const mb = state.margin.bottom / state.figure.height;
+  lines.push(`set lmargin at screen ${ml.toFixed(4)}`);
+  lines.push(`set rmargin at screen ${mr.toFixed(4)}`);
+  lines.push(`set tmargin at screen ${mt.toFixed(4)}`);
+  lines.push(`set bmargin at screen ${mb.toFixed(4)}`);
+
+  if (!state.xaxis.auto) lines.push(`set xrange [${state.xaxis.min}:${state.xaxis.max}]`);
+  if (!state.yaxis.auto) lines.push(`set yrange [${state.yaxis.min}:${state.yaxis.max}]`);
+  if (state.xaxis.log) lines.push('set logscale x');
+  if (state.yaxis.log) lines.push('set logscale y');
+  if (state.xaxis.grid || state.yaxis.grid) lines.push('set grid');
+
+  // Key/legend
+  if (!state.key.show) {
+    lines.push('set key off');
+  } else {
+    const posMap = {
+      'top-right': 'top right', 'top-left': 'top left',
+      'bottom-right': 'bottom right', 'bottom-left': 'bottom left',
+      'outside-right': 'outside right top',
+    };
+    let keyLine = `set key ${posMap[state.key.pos] || 'top right'}`;
+    if (state.key.box) keyLine += ' box';
+    keyLine += ` font ",${state.key.fontSize}"`;
+    lines.push(keyLine);
+  }
+
+  lines.push('');
+
+  // Data + plot commands
+  const visPlots = state.plots.filter(p => p.visible && p.data.length > 0);
+  if (visPlots.length > 0) {
+    const typeMap = {
+      'lines': 'lines', 'points': 'points', 'linespoints': 'linespoints',
+      'boxes': 'boxes', 'impulses': 'impulses', 'steps': 'steps',
+      'fillcurves': 'filledcurves y=0',
+    };
+    const dashMap = { 'solid': 1, 'dashed': 2, 'dotted': 3, 'dashdot': 4 };
+    const ptMap = { 'circle': 7, 'square': 5, 'triangle': 9, 'diamond': 13, 'cross': 2, 'plus': 1 };
+
+    const plotParts = [];
+    let dataIdx = 0;
+
+    visPlots.forEach((p) => {
+      if (p.isFunction && p.funcExpr) {
+        // Function plot — gnuplot can plot functions directly
+        let s = p.funcExpr;
+        s += ` with ${typeMap[p.type] || 'lines'}`;
+        s += ` lc rgb "${p.color}" lw ${p.lineWidth}`;
+        if (p.dashType !== 'solid') s += ` dt ${dashMap[p.dashType]}`;
+        s += ` title "${p.name}"`;
+        plotParts.push(s);
+      } else {
+        // Data plot — inline data
+        const idx = dataIdx++;
+        lines.push(`$data${idx} << EOD`);
+        if (p.hasErrorBars) {
+          p.data.forEach(d => lines.push(`${d.x}\t${d.y}\t${d.yerr || 0}`));
+        } else {
+          p.data.forEach(d => lines.push(`${d.x}\t${d.y}`));
+        }
+        lines.push('EOD');
+        lines.push('');
+
+        let s = `$data${idx}`;
+        if (p.hasErrorBars) {
+          s += ` using 1:2:3 with ${p.type === 'points' || p.type === 'linespoints' ? 'yerrorbars' : 'yerrorlines'}`;
+        } else {
+          s += ` using 1:2 with ${typeMap[p.type] || 'lines'}`;
+        }
+        s += ` lc rgb "${p.color}" lw ${p.lineWidth}`;
+        if (p.type === 'points' || p.type === 'linespoints') {
+          s += ` pt ${ptMap[p.pointType] || 7} ps ${(p.pointSize / 4).toFixed(1)}`;
+        }
+        if (p.dashType !== 'solid') s += ` dt ${dashMap[p.dashType]}`;
+        s += ` title "${p.name}"`;
+        plotParts.push(s);
+      }
+    });
+
+    if (visPlots.some(p => p.isFunction)) {
+      lines.push(`set samples 500`);
+    }
+    lines.push('plot \\');
+    plotParts.forEach((part, i) => {
+      lines.push('  ' + part + (i < plotParts.length - 1 ? ', \\' : ''));
+    });
+  }
+
+  return lines.join('\n');
+}
+
+function showExportModal() {
+  $('export-text').value = generateGnuplotScript();
+  $('export-modal').style.display = 'flex';
+}
+
+function copyExport() {
+  navigator.clipboard.writeText($('export-text').value);
+  $('status-text').textContent = 'Copied to clipboard!';
+}
+
+function downloadExport() {
+  const blob = new Blob([$('export-text').value], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'plot.gp';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ============================================================
+// IMPORT
+// ============================================================
+function showImportModal() {
+  $('import-text').value = '';
+  $('import-modal').style.display = 'flex';
+}
+
+function importData() {
+  const text = $('import-text').value.trim();
+  if (!text) return;
+
+  const lines = text.split('\n').filter(l => l.trim());
+  // Detect if first line is header
+  const firstParts = lines[0].split(/[,\t\s]+/);
+  const hasHeader = firstParts.some(p => isNaN(Number(p)));
+  const startRow = hasHeader ? 1 : 0;
+  const headers = hasHeader ? firstParts : firstParts.map((_, i) => i === 0 ? 'x' : `y${i}`);
+
+  // Create one plot per y column
+  for (let col = 1; col < headers.length; col++) {
+    const plot = createPlot(headers[col]);
+    const dataLines = [];
+    for (let row = startRow; row < lines.length; row++) {
+      const parts = lines[row].split(/[,\t\s]+/).map(Number);
+      if (parts.length > col && isFinite(parts[0]) && isFinite(parts[col])) {
+        plot.data.push({ x: parts[0], y: parts[col] });
+        dataLines.push(`${parts[0]} ${parts[col]}`);
+      }
+    }
+    plot.rawData = dataLines.join('\n');
+    state.plots.push(plot);
+  }
+  selectPlot(state.plots.length - 1);
+  renderPlotList();
+  render();
+  closeModal('import-modal');
+  $('status-text').textContent = `Imported ${headers.length - 1} plot(s)`;
+}
+
+function loadFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => { $('import-text').value = reader.result; };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+function closeModal(id) { $(id).style.display = 'none'; }
+
+// Close modals on overlay click
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', (e) => { if (e.target === el) el.style.display = 'none'; });
+});
+
+function resetZoom() {
+  state.key.x = null;
+  state.key.y = null;
+  state.xaxis.auto = true;
+  state.yaxis.auto = true;
+  syncStateToProps();
+  render();
+  $('status-text').textContent = 'View reset to fit data';
+}
+
+// ============================================================
+// UNDO / REDO
+// ============================================================
+const undoStack = [];
+const redoStack = [];
+let undoTimer = null;
+
+function getStateSnapshot() {
+  return JSON.stringify({
+    figure: state.figure, margin: state.margin,
+    title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
+    labelFontSize: state.labelFontSize,
+    xaxis: {...state.xaxis}, yaxis: {...state.yaxis},
+    key: {...state.key},
+    plots: state.plots.map(p => ({...p, data: [...p.data]})),
+    selectedPlot: state.selectedPlot,
+  });
+}
+
+function pushUndo() {
+  clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => {
+    const snap = getStateSnapshot();
+    if (undoStack.length === 0 || undoStack[undoStack.length - 1] !== snap) {
+      undoStack.push(snap);
+      if (undoStack.length > 50) undoStack.shift();
+      redoStack.length = 0;
+    }
+  }, 300);
+}
+
+function restoreSnapshot(json) {
+  const s = JSON.parse(json);
+  Object.assign(state.figure, s.figure);
+  Object.assign(state.margin, s.margin);
+  state.title = s.title; state.xlabel = s.xlabel; state.ylabel = s.ylabel;
+  state.labelFontSize = s.labelFontSize;
+  Object.assign(state.xaxis, s.xaxis);
+  Object.assign(state.yaxis, s.yaxis);
+  Object.assign(state.key, s.key);
+  state.plots = s.plots;
+  state.selectedPlot = s.selectedPlot;
+  syncStateToProps();
+  renderPlotList();
+  selectPlot(state.selectedPlot);
+  render();
+}
+
+function undo() {
+  if (undoStack.length < 2) { $('status-text').textContent = 'Nothing to undo'; return; }
+  redoStack.push(undoStack.pop());
+  restoreSnapshot(undoStack[undoStack.length - 1]);
+  $('status-text').textContent = 'Undo';
+}
+
+function redo() {
+  if (redoStack.length === 0) { $('status-text').textContent = 'Nothing to redo'; return; }
+  const snap = redoStack.pop();
+  undoStack.push(snap);
+  restoreSnapshot(snap);
+  $('status-text').textContent = 'Redo';
+}
+
+// Hook undo into all changes
+const origRender = render;
+render = function() {
+  origRender();
+  pushUndo();
+};
+
+// ============================================================
+// DUPLICATE PLOT
+// ============================================================
+function duplicatePlot() {
+  if (state.selectedPlot < 0 || state.selectedPlot >= state.plots.length) {
+    $('status-text').textContent = 'Select a plot to duplicate';
+    return;
+  }
+  const src = state.plots[state.selectedPlot];
+  const dup = {...src, id: plotIdCounter++, name: src.name + ' (copy)',
+    data: src.data.map(d => ({...d})),
+    color: COLORS[(state.plots.length) % COLORS.length],
+  };
+  state.plots.push(dup);
+  selectPlot(state.plots.length - 1);
+  renderPlotList();
+  render();
+  $('status-text').textContent = `Duplicated: ${src.name}`;
+}
+
+// ============================================================
+// PNG EXPORT
+// ============================================================
+function exportPNG() {
+  const link = document.createElement('a');
+  link.download = 'gnuplot-studio.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+  $('status-text').textContent = 'PNG exported';
+}
+
+// ============================================================
+// SAVE / LOAD PROJECT
+// ============================================================
+function saveProject() {
+  const data = {
+    version: 1,
+    figure: state.figure, margin: state.margin,
+    title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
+    labelFontSize: state.labelFontSize,
+    xaxis: state.xaxis, yaxis: state.yaxis, key: state.key,
+    plots: state.plots.map(p => ({
+      name: p.name, type: p.type, color: p.color,
+      lineWidth: p.lineWidth, pointSize: p.pointSize, pointType: p.pointType,
+      dashType: p.dashType, fillAlpha: p.fillAlpha, rawData: p.rawData, visible: p.visible,
+    })),
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'gnuplot-studio-project.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  // Also save to localStorage
+  try { localStorage.setItem('gnuplot-studio-autosave', JSON.stringify(data)); } catch(e) {}
+  $('status-text').textContent = 'Project saved';
+}
+
+function loadProject() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        applyProjectData(data);
+        $('status-text').textContent = 'Project loaded';
+      } catch(err) {
+        $('status-text').textContent = 'Error loading project: ' + err.message;
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+function applyProjectData(data) {
+  if (data.figure) Object.assign(state.figure, data.figure);
+  if (data.margin) Object.assign(state.margin, data.margin);
+  if (data.title !== undefined) state.title = data.title;
+  if (data.xlabel !== undefined) state.xlabel = data.xlabel;
+  if (data.ylabel !== undefined) state.ylabel = data.ylabel;
+  if (data.labelFontSize) state.labelFontSize = data.labelFontSize;
+  if (data.xaxis) Object.assign(state.xaxis, data.xaxis);
+  if (data.yaxis) Object.assign(state.yaxis, data.yaxis);
+  if (data.key) Object.assign(state.key, data.key);
+  if (data.plots) {
+    state.plots = data.plots.map(p => {
+      const plot = createPlot(p.name);
+      Object.assign(plot, p);
+      plot.data = parseData(p.rawData || '');
+      return plot;
+    });
+  }
+  state.selectedPlot = state.plots.length > 0 ? 0 : -1;
+  syncStateToProps();
+  renderPlotList();
+  selectPlot(state.selectedPlot);
+  render();
+}
+
+// Auto-restore from localStorage
+function tryAutoRestore() {
+  try {
+    const saved = localStorage.getItem('gnuplot-studio-autosave');
+    if (saved) {
+      const data = JSON.parse(saved);
+      if (data.plots && data.plots.length > 0) {
+        applyProjectData(data);
+        $('status-text').textContent = 'Restored previous session';
+        return true;
+      }
+    }
+  } catch(e) {}
+  return false;
+}
+
+// Auto-save on changes
+let autoSaveTimer = null;
+function scheduleAutoSave() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => {
+    try {
+      const data = {
+        version: 1, figure: state.figure, margin: state.margin,
+        title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
+        labelFontSize: state.labelFontSize,
+        xaxis: state.xaxis, yaxis: state.yaxis, key: state.key,
+        plots: state.plots.map(p => ({
+          name: p.name, type: p.type, color: p.color,
+          lineWidth: p.lineWidth, pointSize: p.pointSize, pointType: p.pointType,
+          dashType: p.dashType, fillAlpha: p.fillAlpha, rawData: p.rawData, visible: p.visible,
+        })),
+      };
+      localStorage.setItem('gnuplot-studio-autosave', JSON.stringify(data));
+    } catch(e) {}
+  }, 1000);
+}
+// Hook auto-save into render
+const prevRender = render;
+render = function() {
+  prevRender();
+  scheduleAutoSave();
+};
+
+// ============================================================
+// ZOOM VIA SCROLL WHEEL
+// ============================================================
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (!state._area || !state._bounds) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const area = state._area;
+
+  // Only zoom when cursor is inside plot area
+  if (mx < area.x || mx > area.x + area.w || my < area.y || my > area.y + area.h) return;
+
+  const bounds = state._bounds;
+  const factor = e.deltaY > 0 ? 1.15 : 1/1.15;
+  const dPos = canvasToData(mx, my, area, bounds);
+
+  // Zoom around cursor position
+  const newXmin = dPos.x - (dPos.x - bounds.xmin) * factor;
+  const newXmax = dPos.x + (bounds.xmax - dPos.x) * factor;
+  const newYmin = dPos.y - (dPos.y - bounds.ymin) * factor;
+  const newYmax = dPos.y + (bounds.ymax - dPos.y) * factor;
+
+  state.xaxis.auto = false;
+  state.yaxis.auto = false;
+  state.xaxis.min = newXmin;
+  state.xaxis.max = newXmax;
+  state.yaxis.min = newYmin;
+  state.yaxis.max = newYmax;
+  syncStateToProps();
+  render();
+}, { passive: false });
+
+// ============================================================
+// TOOLTIP ON HOVER (nearest point)
+// ============================================================
+const tooltip = $('tooltip');
+
+canvas.addEventListener('mousemove', function tooltipHandler(e) {
+  if (dragMode) { tooltip.style.display = 'none'; return; }
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const area = state._area;
+  const bounds = state._bounds;
+  if (!area || !bounds) return;
+  if (mx < area.x || mx > area.x + area.w || my < area.y || my > area.y + area.h) {
+    tooltip.style.display = 'none';
+    return;
+  }
+
+  // Find nearest data point across all visible plots
+  let bestDist = 20; // max pixel distance
+  let bestPlot = null, bestPt = null;
+  for (const plot of state.plots) {
+    if (!plot.visible) continue;
+    for (const d of plot.data) {
+      const cp = dataToCanvas(d.x, d.y, area, bounds);
+      const dist = Math.hypot(cp.x - mx, cp.y - my);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestPlot = plot;
+        bestPt = d;
+      }
+    }
+  }
+
+  if (bestPt) {
+    const canvasArea = $('canvas-area');
+    const caRect = canvasArea.getBoundingClientRect();
+    tooltip.style.display = 'block';
+    tooltip.innerHTML = `<span style="color:${bestPlot.color}">${bestPlot.name}</span><br>x: ${bestPt.x}  y: ${bestPt.y}`;
+    tooltip.style.left = (e.clientX - caRect.left + 12) + 'px';
+    tooltip.style.top = (e.clientY - caRect.top - 10) + 'px';
+  } else {
+    tooltip.style.display = 'none';
+  }
+});
+
+canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+// ============================================================
+// SECTION COLLAPSE
+// ============================================================
+document.querySelectorAll('.prop-section-title').forEach(title => {
+  const body = title.nextElementSibling;
+  if (!body || !body.classList.contains('prop-section-body')) return;
+  // Add arrow
+  const arrow = document.createElement('span');
+  arrow.className = 'collapse-arrow';
+  arrow.textContent = '\u25BC';
+  title.prepend(arrow);
+  arrow.style.marginRight = '6px';
+  title.addEventListener('click', () => {
+    body.classList.toggle('collapsed');
+    arrow.classList.toggle('collapsed');
+  });
+});
+
+// ============================================================
+// KEYBOARD SHORTCUTS
+// ============================================================
+document.addEventListener('keydown', (e) => {
+  // Don't capture when typing in inputs
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); redo(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveProject(); }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
+      const name = state.plots[state.selectedPlot].name;
+      state.plots.splice(state.selectedPlot, 1);
+      if (state.selectedPlot >= state.plots.length) state.selectedPlot = state.plots.length - 1;
+      renderPlotList();
+      selectPlot(state.selectedPlot);
+      render();
+      $('status-text').textContent = `Deleted: ${name}`;
+    }
+  }
+  if (e.key === 'n' || e.key === 'N') { addPlot(); }
+  if (e.key === 'd' || e.key === 'D') { duplicatePlot(); }
+  if (e.key === 'f' || e.key === 'F') { resetZoom(); }
+});
+
+// ============================================================
+// INIT
+// ============================================================
+syncStateToProps();
+if (!tryAutoRestore()) {
+  render();
+  $('status-text').textContent = 'Ready — Click "+ Add Plot" or press N to begin';
+}
+// Initial undo snapshot
+undoStack.push(getStateSnapshot());
+</script>
+</body>
+</html>
