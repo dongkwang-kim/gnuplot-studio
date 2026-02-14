@@ -278,6 +278,22 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
         <div class="prop-section-title">Plot Style</div>
         <div class="prop-section-body" id="plot-props"></div>
       </div>
+
+      <!-- Annotations -->
+      <div class="prop-section">
+        <div class="prop-section-title">Annotations <span style="font-weight:normal;color:#666;font-size:10px">(dbl-click canvas)</span></div>
+        <div class="prop-section-body" id="annotations-list">
+          <div style="color:#666;font-size:11px">Double-click on the plot to add text labels</div>
+        </div>
+      </div>
+
+      <!-- Custom gnuplot commands -->
+      <div class="prop-section">
+        <div class="prop-section-title">Custom Commands</div>
+        <div class="prop-section-body">
+          <textarea id="custom-commands" style="width:100%;height:60px;background:#1e1e1e;color:#d4d4d4;border:1px solid #3e3e3e;font-family:Consolas,monospace;font-size:11px;padding:4px;border-radius:3px;resize:vertical" placeholder="# Extra gnuplot commands&#10;set mxtics 5&#10;set mytics 5" spellcheck="false"></textarea>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -332,6 +348,7 @@ const state = {
   yaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
   key: { show: true, pos: 'top-right', box: true, fontSize: 11, x: null, y: null },
   annotations: [], // [{text, x, y, fontSize, color}]
+  customCommands: '',
   plots: [],
   selectedPlot: -1,
 };
@@ -951,8 +968,11 @@ function renderPlotList() {
   state.plots.forEach((p, i) => {
     const item = document.createElement('div');
     item.className = 'plot-item' + (i === state.selectedPlot ? ' selected' : '');
+    item.draggable = true;
+    item.dataset.index = i;
     const safeName = p.name.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     item.innerHTML = `
+      <span style="cursor:grab;color:#555;font-size:10px;margin-right:2px">&#9776;</span>
       <div class="swatch" style="background:${p.color};opacity:${p.visible ? 1 : 0.3}"></div>
       <span class="name">${safeName}</span>
       <button class="remove-btn" title="Remove">&times;</button>
@@ -967,6 +987,32 @@ function renderPlotList() {
         return;
       }
       selectPlot(i);
+    });
+    // Drag-to-reorder
+    item.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', i);
+      item.style.opacity = '0.4';
+    });
+    item.addEventListener('dragend', () => { item.style.opacity = '1'; });
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      item.style.borderTop = '2px solid #9cdcfe';
+    });
+    item.addEventListener('dragleave', () => { item.style.borderTop = ''; });
+    item.addEventListener('drop', (e) => {
+      e.preventDefault();
+      item.style.borderTop = '';
+      const fromIdx = +e.dataTransfer.getData('text/plain');
+      const toIdx = i;
+      if (fromIdx === toIdx) return;
+      const [moved] = state.plots.splice(fromIdx, 1);
+      state.plots.splice(toIdx, 0, moved);
+      // Adjust selection
+      if (state.selectedPlot === fromIdx) state.selectedPlot = toIdx;
+      else if (fromIdx < state.selectedPlot && toIdx >= state.selectedPlot) state.selectedPlot--;
+      else if (fromIdx > state.selectedPlot && toIdx <= state.selectedPlot) state.selectedPlot++;
+      renderPlotList();
+      render();
     });
     list.appendChild(item);
   });
@@ -1047,6 +1093,15 @@ function renderPlotProps(plot) {
       <input type="checkbox" id="pp-vis" ${plot.visible?'checked':''}>
     </div>
     <div class="prop-row">
+      <label>Smooth</label>
+      <select id="pp-smooth">
+        <option value="none" ${plot.smooth==='none'?'selected':''}>None</option>
+        <option value="csplines" ${plot.smooth==='csplines'?'selected':''}>C-Splines</option>
+        <option value="bezier" ${plot.smooth==='bezier'?'selected':''}>Bezier</option>
+        <option value="acsplines" ${plot.smooth==='acsplines'?'selected':''}>A-C-Splines</option>
+      </select>
+    </div>
+    <div class="prop-row">
       <label>Error Bars</label>
       <input type="checkbox" id="pp-errbars" ${plot.hasErrorBars?'checked':''}>
     </div>
@@ -1088,6 +1143,7 @@ function syncPlotProps(plot) {
   plot.dashType = $('pp-dash').value;
   plot.fillAlpha = +$('pp-fa').value;
   plot.visible = $('pp-vis').checked;
+  plot.smooth = $('pp-smooth').value;
   plot.hasErrorBars = $('pp-errbars').checked;
   plot.isFunction = $('pp-isfunc').checked;
   plot.funcExpr = $('pp-funcexpr').value;
@@ -1263,9 +1319,30 @@ canvas.addEventListener('dblclick', (e) => {
   if (text) {
     state.annotations.push({ text, x: d.x, y: d.y, fontSize: 12, color: '#333333' });
     render();
+    renderAnnotationList();
     $('status-text').textContent = 'Annotation added (double-click to add more)';
   }
 });
+
+function renderAnnotationList() {
+  const container = $('annotations-list');
+  if (state.annotations.length === 0) {
+    container.innerHTML = '<div style="color:#666;font-size:11px">Double-click on the plot to add text labels</div>';
+    return;
+  }
+  container.innerHTML = state.annotations.map((ann, i) =>
+    `<div class="prop-row" style="font-size:11px">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc">"${ann.text.replace(/"/g, '&quot;').replace(/</g, '&lt;')}"</span>
+      <button class="remove-btn" onclick="removeAnnotation(${i})" title="Remove">&times;</button>
+    </div>`
+  ).join('');
+}
+
+function removeAnnotation(idx) {
+  state.annotations.splice(idx, 1);
+  renderAnnotationList();
+  render();
+}
 
 // ============================================================
 // GNUPLOT EXPORT
@@ -1339,6 +1416,14 @@ function generateGnuplotScript() {
     lines.push(`set label ${i + 1} "${ann.text}" at ${ann.x},${ann.y} font ",${ann.fontSize}" tc rgb "${ann.color}"`);
   });
 
+  // Custom commands
+  const customCmd = ($('custom-commands') || {}).value || state.customCommands || '';
+  if (customCmd.trim()) {
+    lines.push('');
+    lines.push('# Custom commands');
+    lines.push(customCmd.trim());
+  }
+
   lines.push('');
 
   // Data + plot commands
@@ -1395,6 +1480,7 @@ function generateGnuplotScript() {
           s += ` pt ${ptMap[p.pointType] || 7} ps ${(p.pointSize / 4).toFixed(1)}`;
         }
         if (p.dashType !== 'solid') s += ` dt ${dashMap[p.dashType]}`;
+        if (p.smooth && p.smooth !== 'none') s += ` smooth ${p.smooth}`;
         s += ` title "${p.name}"`;
         plotParts.push(s);
       }
