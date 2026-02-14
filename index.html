@@ -67,14 +67,6 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
 }
 #plot-canvas { box-shadow: 0 2px 24px rgba(0,0,0,0.5); cursor: crosshair; }
 
-/* Margin drag handles (overlaid on canvas) */
-.margin-handle {
-  position: absolute; background: rgba(100,149,237,0.0); z-index: 10;
-}
-.margin-handle:hover { background: rgba(100,149,237,0.15); }
-.margin-handle.dragging { background: rgba(100,149,237,0.25); }
-.margin-handle.h-top, .margin-handle.h-bottom { cursor: ns-resize; }
-.margin-handle.h-left, .margin-handle.h-right { cursor: ew-resize; }
 
 /* Right panel */
 #right-panel {
@@ -100,14 +92,6 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
 .prop-row input[type="color"] { width: 28px; height: 24px; padding: 0; border: 1px solid #3e3e3e; border-radius: 3px; background: none; cursor: pointer; }
 .prop-row input:focus, .prop-row select:focus { border-color: #9cdcfe; outline: none; }
 
-/* Inline number with drag */
-.drag-number {
-  display: inline-flex; align-items: center; background: #1e1e1e; border: 1px solid #3e3e3e;
-  border-radius: 3px; padding: 2px 4px; cursor: ew-resize; user-select: none; min-width: 50px;
-  font-size: 12px; color: #ddd; justify-content: center;
-}
-.drag-number:hover { border-color: #666; }
-.drag-number.active { border-color: #9cdcfe; }
 
 /* Checkbox */
 .prop-row input[type="checkbox"] { accent-color: #9cdcfe; }
@@ -134,12 +118,6 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
   border-radius: 4px; font-size: 11px; pointer-events: none; z-index: 50;
   white-space: nowrap; border: 1px solid #555; display: none;
   font-family: 'Consolas', monospace;
-}
-
-/* Zoom selection rect */
-#zoom-rect {
-  position: absolute; border: 1px dashed rgba(100,149,237,0.8); background: rgba(100,149,237,0.1);
-  pointer-events: none; z-index: 20; display: none;
 }
 
 /* Section collapse */
@@ -197,7 +175,6 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
     <div id="canvas-area">
       <canvas id="plot-canvas"></canvas>
       <div id="tooltip"></div>
-      <div id="zoom-rect"></div>
     </div>
 
     <!-- Right: Properties -->
@@ -215,6 +192,17 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
           <div class="prop-row">
             <label>BG Color</label>
             <input type="color" id="fig-bg" value="#ffffff">
+          </div>
+          <div class="prop-row">
+            <label>Terminal</label>
+            <select id="fig-term">
+              <option value="pngcairo">PNG (pngcairo)</option>
+              <option value="svg">SVG</option>
+              <option value="pdfcairo">PDF (pdfcairo)</option>
+              <option value="epscairo">EPS (epscairo)</option>
+              <option value="tikz">TikZ/LaTeX</option>
+              <option value="qt">Qt (interactive)</option>
+            </select>
           </div>
         </div>
       </div>
@@ -336,13 +324,14 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
 const COLORS = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'];
 
 const state = {
-  figure: { width: 800, height: 600, bg: '#ffffff' },
+  figure: { width: 800, height: 600, bg: '#ffffff', terminal: 'pngcairo' },
   margin: { top: 60, right: 40, bottom: 60, left: 70 },
   title: '', xlabel: '', ylabel: '',
   labelFontSize: 14,
   xaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
   yaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
   key: { show: true, pos: 'top-right', box: true, fontSize: 11, x: null, y: null },
+  annotations: [], // [{text, x, y, fontSize, color}]
   plots: [],
   selectedPlot: -1,
 };
@@ -469,7 +458,22 @@ function canvasToData(cx, cy, area, bounds) {
   const { xmin, xmax, ymin, ymax } = bounds;
   const nx = (cx - area.x) / area.w;
   const ny = 1 - (cy - area.y) / area.h;
-  return { x: xmin + nx * (xmax - xmin), y: ymin + ny * (ymax - ymin) };
+  let x, y;
+  if (state.xaxis.log) {
+    const logMin = Math.log10(Math.max(xmin, 1e-10));
+    const logMax = Math.log10(Math.max(xmax, 1e-10));
+    x = Math.pow(10, logMin + nx * (logMax - logMin));
+  } else {
+    x = xmin + nx * (xmax - xmin);
+  }
+  if (state.yaxis.log) {
+    const logMin = Math.log10(Math.max(ymin, 1e-10));
+    const logMax = Math.log10(Math.max(ymax, 1e-10));
+    y = Math.pow(10, logMin + ny * (logMax - logMin));
+  } else {
+    y = ymin + ny * (ymax - ymin);
+  }
+  return { x, y };
 }
 
 function drawPoint(cx, cy, type, size, color) {
@@ -507,8 +511,12 @@ function setDash(dashType) {
 function render() {
   const W = state.figure.width;
   const H = state.figure.height;
-  canvas.width = W;
-  canvas.height = H;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
 
   // Background
@@ -727,6 +735,16 @@ function render() {
     ctx.restore();
   }
 
+  // Annotations
+  for (const ann of state.annotations) {
+    const p = dataToCanvas(ann.x, ann.y, area, bounds);
+    ctx.fillStyle = ann.color || '#333';
+    ctx.font = `${ann.fontSize || 12}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(ann.text, p.x, p.y);
+  }
+
   // Legend
   if (state.key.show && state.plots.some(p => p.visible)) {
     const visPlots = state.plots.filter(p => p.visible);
@@ -802,23 +820,26 @@ function evalFunction(expr, xmin, xmax, samples) {
   const data = [];
   const step = (xmax - xmin) / (samples - 1);
   // Build a safe evaluator using Math functions
+  // Order matters: longer names first to avoid partial matches
   const safeExpr = expr
     .replace(/\bsin\b/g, 'Math.sin')
     .replace(/\bcos\b/g, 'Math.cos')
     .replace(/\btan\b/g, 'Math.tan')
+    .replace(/\basin\b/g, 'Math.asin')
+    .replace(/\bacos\b/g, 'Math.acos')
+    .replace(/\batan2?\b/g, 'Math.atan')
     .replace(/\babs\b/g, 'Math.abs')
     .replace(/\bsqrt\b/g, 'Math.sqrt')
-    .replace(/\blog\b/g, 'Math.log')
     .replace(/\blog10\b/g, 'Math.log10')
     .replace(/\blog2\b/g, 'Math.log2')
+    .replace(/\blog\b/g, 'Math.log')
     .replace(/\bexp\b/g, 'Math.exp')
     .replace(/\bfloor\b/g, 'Math.floor')
     .replace(/\bceil\b/g, 'Math.ceil')
     .replace(/\bpow\b/g, 'Math.pow')
     .replace(/\bPI\b/g, 'Math.PI')
     .replace(/\bpi\b/g, 'Math.PI')
-    .replace(/\be\b/g, 'Math.E')
-    .replace(/\*\*/g, '**');
+    .replace(/(?<!\d)(?<!\d\.)\be\b(?!\d)/g, 'Math.E');
   try {
     const fn = new Function('x', 'return ' + safeExpr);
     for (let i = 0; i < samples; i++) {
@@ -842,6 +863,7 @@ function syncPropsToState() {
   state.figure.width = +$('fig-w').value;
   state.figure.height = +$('fig-h').value;
   state.figure.bg = $('fig-bg').value;
+  state.figure.terminal = $('fig-term').value;
   state.margin.top = +$('m-top').value;
   state.margin.bottom = +$('m-bottom').value;
   state.margin.left = +$('m-left').value;
@@ -875,6 +897,7 @@ function syncStateToProps() {
   $('fig-w').value = state.figure.width;
   $('fig-h').value = state.figure.height;
   $('fig-bg').value = state.figure.bg;
+  $('fig-term').value = state.figure.terminal || 'pngcairo';
   $('m-top').value = state.margin.top;
   $('m-bottom').value = state.margin.bottom;
   $('m-left').value = state.margin.left;
@@ -928,9 +951,10 @@ function renderPlotList() {
   state.plots.forEach((p, i) => {
     const item = document.createElement('div');
     item.className = 'plot-item' + (i === state.selectedPlot ? ' selected' : '');
+    const safeName = p.name.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     item.innerHTML = `
       <div class="swatch" style="background:${p.color};opacity:${p.visible ? 1 : 0.3}"></div>
-      <span class="name">${p.name}</span>
+      <span class="name">${safeName}</span>
       <button class="remove-btn" title="Remove">&times;</button>
     `;
     item.addEventListener('click', (e) => {
@@ -1225,21 +1249,53 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseup', () => { dragMode = null; });
 canvas.addEventListener('mouseleave', () => { dragMode = null; });
 
+// Double-click to add annotation
+canvas.addEventListener('dblclick', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const area = state._area;
+  const bounds = state._bounds;
+  if (!area || !bounds) return;
+  if (mx < area.x || mx > area.x + area.w || my < area.y || my > area.y + area.h) return;
+  const d = canvasToData(mx, my, area, bounds);
+  const text = prompt('Annotation text:');
+  if (text) {
+    state.annotations.push({ text, x: d.x, y: d.y, fontSize: 12, color: '#333333' });
+    render();
+    $('status-text').textContent = 'Annotation added (double-click to add more)';
+  }
+});
+
 // ============================================================
 // GNUPLOT EXPORT
 // ============================================================
 function generateGnuplotScript() {
   const lines = [];
   lines.push('# Generated by Gnuplot Studio');
-  lines.push(`set terminal pngcairo size ${state.figure.width},${state.figure.height} enhanced font "sans,${state.labelFontSize}"`);
-  lines.push('set output "plot.png"');
+
+  // Terminal
+  const term = state.figure.terminal || 'pngcairo';
+  const extMap = { pngcairo: 'png', svg: 'svg', pdfcairo: 'pdf', epscairo: 'eps', tikz: 'tex', qt: '' };
+  const ext = extMap[term] || 'png';
+  if (term === 'qt') {
+    lines.push(`set terminal qt size ${state.figure.width},${state.figure.height} enhanced font "sans,${state.labelFontSize}"`);
+  } else {
+    lines.push(`set terminal ${term} size ${state.figure.width},${state.figure.height} enhanced font "sans,${state.labelFontSize}"`);
+    if (ext) lines.push(`set output "plot.${ext}"`);
+  }
   lines.push('');
 
   if (state.title) lines.push(`set title "${state.title}"`);
   if (state.xlabel) lines.push(`set xlabel "${state.xlabel}"`);
   if (state.ylabel) lines.push(`set ylabel "${state.ylabel}"`);
 
-  // Margins (gnuplot uses screen coordinates 0-1)
+  // Background color (if not white)
+  if (state.figure.bg && state.figure.bg !== '#ffffff') {
+    lines.push(`set object 1 rectangle from screen 0,0 to screen 1,1 behind fillcolor rgb "${state.figure.bg}" fillstyle solid noborder`);
+  }
+
+  // Margins (gnuplot screen coordinates 0-1)
   const ml = state.margin.left / state.figure.width;
   const mr = 1 - state.margin.right / state.figure.width;
   const mt = 1 - state.margin.top / state.figure.height;
@@ -1253,7 +1309,15 @@ function generateGnuplotScript() {
   if (!state.yaxis.auto) lines.push(`set yrange [${state.yaxis.min}:${state.yaxis.max}]`);
   if (state.xaxis.log) lines.push('set logscale x');
   if (state.yaxis.log) lines.push('set logscale y');
-  if (state.xaxis.grid || state.yaxis.grid) lines.push('set grid');
+
+  // Grid — per-axis control
+  if (state.xaxis.grid && state.yaxis.grid) {
+    lines.push('set grid xtics ytics');
+  } else if (state.xaxis.grid) {
+    lines.push('set grid xtics noytics');
+  } else if (state.yaxis.grid) {
+    lines.push('set grid noxtics ytics');
+  }
 
   // Key/legend
   if (!state.key.show) {
@@ -1269,6 +1333,11 @@ function generateGnuplotScript() {
     keyLine += ` font ",${state.key.fontSize}"`;
     lines.push(keyLine);
   }
+
+  // Annotations
+  state.annotations.forEach((ann, i) => {
+    lines.push(`set label ${i + 1} "${ann.text}" at ${ann.x},${ann.y} font ",${ann.fontSize}" tc rgb "${ann.color}"`);
+  });
 
   lines.push('');
 
@@ -1286,10 +1355,18 @@ function generateGnuplotScript() {
     const plotParts = [];
     let dataIdx = 0;
 
+    // Fill style for fillcurves
+    const hasFill = visPlots.some(p => p.type === 'fillcurves' || p.type === 'boxes');
+    if (hasFill) {
+      const avgAlpha = visPlots.filter(p => p.type === 'fillcurves' || p.type === 'boxes')
+        .reduce((s, p) => s + p.fillAlpha, 0) / visPlots.filter(p => p.type === 'fillcurves' || p.type === 'boxes').length;
+      lines.push(`set style fill transparent solid ${avgAlpha.toFixed(2)}`);
+    }
+
     visPlots.forEach((p) => {
       if (p.isFunction && p.funcExpr) {
-        // Function plot — gnuplot can plot functions directly
-        let s = p.funcExpr;
+        // Function plot — gnuplot can plot functions directly with domain
+        let s = `[${p.funcXmin}:${p.funcXmax}] ${p.funcExpr}`;
         s += ` with ${typeMap[p.type] || 'lines'}`;
         s += ` lc rgb "${p.color}" lw ${p.lineWidth}`;
         if (p.dashType !== 'solid') s += ` dt ${dashMap[p.dashType]}`;
@@ -1426,6 +1503,7 @@ function resetZoom() {
 const undoStack = [];
 const redoStack = [];
 let undoTimer = null;
+let undoSuspended = false;
 
 function getStateSnapshot() {
   return JSON.stringify({
@@ -1440,6 +1518,7 @@ function getStateSnapshot() {
 }
 
 function pushUndo() {
+  if (undoSuspended) return;
   clearTimeout(undoTimer);
   undoTimer = setTimeout(() => {
     const snap = getStateSnapshot();
@@ -1452,6 +1531,7 @@ function pushUndo() {
 }
 
 function restoreSnapshot(json) {
+  undoSuspended = true;
   const s = JSON.parse(json);
   Object.assign(state.figure, s.figure);
   Object.assign(state.margin, s.margin);
@@ -1466,6 +1546,7 @@ function restoreSnapshot(json) {
   renderPlotList();
   selectPlot(state.selectedPlot);
   render();
+  undoSuspended = false;
 }
 
 function undo() {
@@ -1514,11 +1595,12 @@ function duplicatePlot() {
 // PNG EXPORT
 // ============================================================
 function exportPNG() {
+  // Canvas is already rendered at HiDPI resolution — toDataURL captures full resolution
   const link = document.createElement('a');
   link.download = 'gnuplot-studio.png';
   link.href = canvas.toDataURL('image/png');
   link.click();
-  $('status-text').textContent = 'PNG exported';
+  $('status-text').textContent = 'PNG exported (high resolution)';
 }
 
 // ============================================================
@@ -1535,6 +1617,8 @@ function saveProject() {
       name: p.name, type: p.type, color: p.color,
       lineWidth: p.lineWidth, pointSize: p.pointSize, pointType: p.pointType,
       dashType: p.dashType, fillAlpha: p.fillAlpha, rawData: p.rawData, visible: p.visible,
+      isFunction: p.isFunction, funcExpr: p.funcExpr, funcXmin: p.funcXmin,
+      funcXmax: p.funcXmax, funcSamples: p.funcSamples, hasErrorBars: p.hasErrorBars,
     })),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -1584,9 +1668,14 @@ function applyProjectData(data) {
     state.plots = data.plots.map(p => {
       const plot = createPlot(p.name);
       Object.assign(plot, p);
-      plot.data = parseData(p.rawData || '');
+      if (plot.isFunction && plot.funcExpr) {
+        plot.data = evalFunction(plot.funcExpr, plot.funcXmin, plot.funcXmax, plot.funcSamples);
+      } else {
+        plot.data = parseData(p.rawData || '');
+      }
       return plot;
     });
+    plotIdCounter = Math.max(plotIdCounter, ...state.plots.map(p => p.id + 1));
   }
   state.selectedPlot = state.plots.length > 0 ? 0 : -1;
   syncStateToProps();
@@ -1747,9 +1836,9 @@ document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
   if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
-  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); redo(); }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) { e.preventDefault(); redo(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveProject(); }
-  if (e.key === 'Delete' || e.key === 'Backspace') {
+  if (e.key === 'Delete') {
     if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
       const name = state.plots[state.selectedPlot].name;
       state.plots.splice(state.selectedPlot, 1);
@@ -1760,9 +1849,9 @@ document.addEventListener('keydown', (e) => {
       $('status-text').textContent = `Deleted: ${name}`;
     }
   }
-  if (e.key === 'n' || e.key === 'N') { addPlot(); }
-  if (e.key === 'd' || e.key === 'D') { duplicatePlot(); }
-  if (e.key === 'f' || e.key === 'F') { resetZoom(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); addPlot(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'd') { e.preventDefault(); duplicatePlot(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === '0') { e.preventDefault(); resetZoom(); }
 });
 
 // ============================================================
