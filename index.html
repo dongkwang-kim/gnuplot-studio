@@ -50,6 +50,9 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
 .plot-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plot-item .remove-btn { background: none; border: none; color: #666; cursor: pointer; font-size: 14px; }
 .plot-item .remove-btn:hover { color: #e55; }
+.plot-item .vis-btn { background: none; border: none; color: #888; cursor: pointer; font-size: 13px; padding: 0 2px; line-height: 1; }
+.plot-item .vis-btn:hover { color: #ccc; }
+.plot-item .vis-btn.hidden { opacity: 0.35; }
 
 /* Data editor (bottom of left panel) */
 #data-section { border-top: 1px solid #3e3e3e; display: flex; flex-direction: column; max-height: 50%; }
@@ -124,6 +127,24 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
 .prop-section-body.collapsed { display: none; }
 .prop-section-title .collapse-arrow { transition: transform 0.15s; display: inline-block; font-size: 10px; }
 .prop-section-title .collapse-arrow.collapsed { transform: rotate(-90deg); }
+
+/* Shortcuts help overlay */
+#shortcuts-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.55); z-index: 200; display: none;
+  align-items: center; justify-content: center;
+}
+#shortcuts-overlay.visible { display: flex; }
+#shortcuts-box {
+  background: #2d2d2d; border: 1px solid #555; border-radius: 8px; padding: 20px 28px;
+  min-width: 380px; color: #ddd; font-size: 13px;
+}
+#shortcuts-box h3 { margin: 0 0 12px; font-size: 15px; color: #9cdcfe; }
+#shortcuts-box table { width: 100%; border-collapse: collapse; }
+#shortcuts-box td { padding: 4px 0; }
+#shortcuts-box td:first-child { color: #e0e0e0; font-family: Consolas, monospace; font-size: 12px; width: 130px; }
+#shortcuts-box td:last-child { color: #aaa; }
+#shortcuts-box .sep { border-top: 1px solid #3e3e3e; height: 1px; }
 
 /* Status bar */
 #status-bar {
@@ -334,6 +355,33 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
   </div>
 </div>
 
+<!-- Keyboard shortcuts overlay -->
+<div id="shortcuts-overlay" onclick="this.classList.remove('visible')">
+  <div id="shortcuts-box" onclick="event.stopPropagation()">
+    <h3>Keyboard Shortcuts</h3>
+    <table>
+      <tr><td>Ctrl + N</td><td>Add new data plot</td></tr>
+      <tr><td>Ctrl + D</td><td>Duplicate selected plot</td></tr>
+      <tr><td>Delete</td><td>Remove selected plot</td></tr>
+      <tr><td colspan="2" class="sep"></td></tr>
+      <tr><td>Ctrl + Z</td><td>Undo</td></tr>
+      <tr><td>Ctrl + Y</td><td>Redo</td></tr>
+      <tr><td>Ctrl + S</td><td>Save project</td></tr>
+      <tr><td>Ctrl + 0</td><td>Fit / reset zoom</td></tr>
+      <tr><td colspan="2" class="sep"></td></tr>
+      <tr><td>Scroll wheel</td><td>Zoom in / out</td></tr>
+      <tr><td>Shift + drag</td><td>Pan the view</td></tr>
+      <tr><td>Drag data point</td><td>Adjust plot X offset</td></tr>
+      <tr><td>Drag margin edge</td><td>Resize margins</td></tr>
+      <tr><td>Drag legend</td><td>Move legend</td></tr>
+      <tr><td>Drag legend edge</td><td>Resize legend layout</td></tr>
+      <tr><td>Double-click</td><td>Add annotation</td></tr>
+      <tr><td colspan="2" class="sep"></td></tr>
+      <tr><td>?</td><td>Show / hide this help</td></tr>
+    </table>
+  </div>
+</div>
+
 <script>
 // ============================================================
 // STATE
@@ -534,6 +582,69 @@ function setDash(dashType) {
   }
 }
 
+// Smooth curve interpolation: returns densified array of {x, y} canvas points
+function smoothPoints(pts, mode) {
+  if (pts.length < 3 || mode === 'none') return pts;
+  if (mode === 'bezier') {
+    // Catmull-Rom → cubic bezier through all points
+    const out = [];
+    const tension = 0.3;
+    const steps = 12; // segments between each pair
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(i - 1, 0)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(i + 2, pts.length - 1)];
+      for (let t = 0; t <= steps; t++) {
+        const s = t / steps;
+        const s2 = s * s, s3 = s2 * s;
+        const x = 0.5 * ((2*p1.x) + (-p0.x+p2.x)*s + (2*p0.x-5*p1.x+4*p2.x-p3.x)*s2 + (-p0.x+3*p1.x-3*p2.x+p3.x)*s3);
+        const y = 0.5 * ((2*p1.y) + (-p0.y+p2.y)*s + (2*p0.y-5*p1.y+4*p2.y-p3.y)*s2 + (-p0.y+3*p1.y-3*p2.y+p3.y)*s3);
+        if (i > 0 || t > 0) out.push({ x, y });
+      }
+    }
+    return out;
+  }
+  // csplines / acsplines: natural cubic spline interpolation
+  const n = pts.length;
+  // Solve for spline coefficients on x and y independently as a function of index
+  function cubicSpline(vals) {
+    const m = vals.length;
+    const a = vals.slice();
+    const b = new Float64Array(m), d = new Float64Array(m);
+    const c = new Float64Array(m);
+    const h = new Float64Array(m - 1);
+    for (let i = 0; i < m - 1; i++) h[i] = 1; // uniform parameterization
+    const alpha = new Float64Array(m);
+    for (let i = 1; i < m - 1; i++) alpha[i] = 3 * (a[i+1] - 2*a[i] + a[i-1]);
+    const l = new Float64Array(m), mu = new Float64Array(m), z = new Float64Array(m);
+    l[0] = 1;
+    for (let i = 1; i < m - 1; i++) {
+      l[i] = 4 - mu[i-1]; mu[i] = 1 / l[i]; z[i] = (alpha[i] - z[i-1]) / l[i];
+    }
+    l[m-1] = 1;
+    for (let j = m - 2; j >= 0; j--) {
+      c[j] = z[j] - mu[j] * c[j+1];
+      b[j] = (a[j+1] - a[j]) - (c[j+1] + 2*c[j]) / 3;
+      d[j] = (c[j+1] - c[j]) / 3;
+    }
+    return { a, b, c, d };
+  }
+  const sx = cubicSpline(pts.map(p => p.x));
+  const sy = cubicSpline(pts.map(p => p.y));
+  const out = [];
+  const steps = 12;
+  for (let i = 0; i < n - 1; i++) {
+    for (let t = 0; t <= steps; t++) {
+      const s = t / steps;
+      const x = sx.a[i] + sx.b[i]*s + sx.c[i]*s*s + sx.d[i]*s*s*s;
+      const y = sy.a[i] + sy.b[i]*s + sy.c[i]*s*s + sy.d[i]*s*s*s;
+      if (i > 0 || t > 0) out.push({ x, y });
+    }
+  }
+  return out;
+}
+
 function render() {
   const W = state.figure.width;
   const H = state.figure.height;
@@ -573,6 +684,19 @@ function render() {
   ctx.fillStyle = '#fafafa';
   ctx.fillRect(area.x, area.y, area.w, area.h);
 
+  // Empty state guidance
+  if (state.plots.length === 0) {
+    ctx.fillStyle = '#bbb';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const cx = area.x + area.w / 2, cy = area.y + area.h / 2;
+    ctx.fillText('Click "+ Data" or "+ f(x)" to add a plot', cx, cy - 20);
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#ccc';
+    ctx.fillText('Ctrl+N  new plot    Shift+drag  pan    Scroll  zoom    ?  shortcuts', cx, cy + 10);
+  }
+
   // Grid
   ctx.save();
   ctx.beginPath();
@@ -608,11 +732,12 @@ function render() {
 
     // Draw based on type
     if (plot.type === 'lines' || plot.type === 'linespoints') {
+      const drawPts = (plot.smooth && plot.smooth !== 'none') ? smoothPoints(pts, plot.smooth) : pts;
       setDash(plot.dashType);
       ctx.lineWidth = plot.lineWidth;
       ctx.beginPath();
       let first = true;
-      for (const p of pts) {
+      for (const p of drawPts) {
         if (first) { ctx.moveTo(p.x, p.y); first = false; }
         else ctx.lineTo(p.x, p.y);
       }
@@ -690,19 +815,20 @@ function render() {
     }
 
     if (plot.type === 'fillcurves') {
+      const drawPts = (plot.smooth && plot.smooth !== 'none') ? smoothPoints(pts, plot.smooth) : pts;
       const baseline = dataToCanvas(0, Math.max(bounds.ymin, 0), area, bounds);
       ctx.globalAlpha = plot.fillAlpha;
       ctx.beginPath();
-      ctx.moveTo(pts[0].x, baseline.y);
-      for (const p of pts) ctx.lineTo(p.x, p.y);
-      ctx.lineTo(pts[pts.length - 1].x, baseline.y);
+      ctx.moveTo(drawPts[0].x, baseline.y);
+      for (const p of drawPts) ctx.lineTo(p.x, p.y);
+      ctx.lineTo(drawPts[drawPts.length - 1].x, baseline.y);
       ctx.closePath();
       ctx.fill();
       ctx.globalAlpha = 1;
       ctx.lineWidth = plot.lineWidth;
       ctx.beginPath();
       let first = true;
-      for (const p of pts) {
+      for (const p of drawPts) {
         if (first) { ctx.moveTo(p.x, p.y); first = false; } else ctx.lineTo(p.x, p.y);
       }
       ctx.stroke();
@@ -1052,7 +1178,8 @@ function renderPlotList() {
     item.innerHTML = `
       <span style="cursor:grab;color:#555;font-size:10px;margin-right:2px">&#9776;</span>
       <div class="swatch" style="background:${p.color};opacity:${p.visible ? 1 : 0.3}"></div>
-      <span class="name">${safeName}</span>
+      <span class="name" style="opacity:${p.visible ? 1 : 0.4}">${safeName}</span>
+      <button class="vis-btn${p.visible ? '' : ' hidden'}" title="${p.visible ? 'Hide' : 'Show'}">${p.visible ? '\u25C9' : '\u25CE'}</button>
       <button class="remove-btn" title="Remove">&times;</button>
     `;
     item.addEventListener('click', (e) => {
@@ -1061,6 +1188,13 @@ function renderPlotList() {
         if (state.selectedPlot >= state.plots.length) state.selectedPlot = state.plots.length - 1;
         renderPlotList();
         selectPlot(state.selectedPlot);
+        render();
+        return;
+      }
+      if (e.target.classList.contains('vis-btn')) {
+        p.visible = !p.visible;
+        renderPlotList();
+        if (i === state.selectedPlot) renderPlotProps(p);
         render();
         return;
       }
@@ -1348,6 +1482,17 @@ canvas.addEventListener('mousedown', (e) => {
       dragMode = 'margin-right'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.right }; return;
     }
 
+    // Shift+drag inside plot area → pan
+    if (e.shiftKey && mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) {
+      const bounds = state._bounds;
+      if (bounds) {
+        dragMode = 'pan';
+        dragStart = { x: mx, y: my };
+        dragOriginal = { xmin: bounds.xmin, xmax: bounds.xmax, ymin: bounds.ymin, ymax: bounds.ymax };
+        return;
+      }
+    }
+
     // Check plot-offset drag: click near a data point inside plot area
     if (mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) {
       const bounds = state._bounds;
@@ -1424,6 +1569,27 @@ canvas.addEventListener('mousemove', (e) => {
   }
 
   if (!dragMode) return;
+
+  if (dragMode === 'pan') {
+    canvas.style.cursor = 'all-scroll';
+    const area = state._area;
+    if (area) {
+      // Convert pixel delta to data-unit delta using original bounds
+      const pxPerDataX = area.w / (dragOriginal.xmax - dragOriginal.xmin);
+      const pxPerDataY = area.h / (dragOriginal.ymax - dragOriginal.ymin);
+      const dx = (mx - dragStart.x) / pxPerDataX;
+      const dy = (my - dragStart.y) / pxPerDataY;
+      state.xaxis.auto = false;
+      state.yaxis.auto = false;
+      state.xaxis.min = Math.round(dragOriginal.xmin - dx);
+      state.xaxis.max = Math.round(dragOriginal.xmax - dx);
+      state.yaxis.min = Math.round(dragOriginal.ymin + dy);
+      state.yaxis.max = Math.round(dragOriginal.ymax + dy);
+      syncStateToProps();
+    }
+    render();
+    return;
+  }
 
   if (dragMode === 'plot-offset' && dragPlot) {
     canvas.style.cursor = 'grabbing';
@@ -2128,6 +2294,8 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); addPlot(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'd') { e.preventDefault(); duplicatePlot(); }
   if ((e.ctrlKey || e.metaKey) && e.key === '0') { e.preventDefault(); resetZoom(); }
+  if (e.key === '?') { $('shortcuts-overlay').classList.toggle('visible'); }
+  if (e.key === 'Escape') { $('shortcuts-overlay').classList.remove('visible'); }
 });
 
 // ============================================================
