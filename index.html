@@ -379,6 +379,9 @@ function createPlot(name) {
     funcSamples: 200,
     // Error bars
     hasErrorBars: false, // if true, data has {x, y, yerr}
+    // Position offset & bar width
+    xOffset: 0,    // shift all x values by this amount (data units)
+    barWidth: 0,   // 0 = auto, otherwise explicit width in data units
   };
 }
 
@@ -401,8 +404,13 @@ function computeDataBounds() {
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
   for (const p of state.plots) {
     if (!p.visible) continue;
+    const xOff = p.xOffset || 0;
+    const halfBar = (p.barWidth || 0) / 2;
     for (const d of p.data) {
-      if (isFinite(d.x)) { xmin = Math.min(xmin, d.x); xmax = Math.max(xmax, d.x); }
+      if (isFinite(d.x)) {
+        xmin = Math.min(xmin, d.x + xOff - halfBar);
+        xmax = Math.max(xmax, d.x + xOff + halfBar);
+      }
       if (isFinite(d.y)) { ymin = Math.min(ymin, d.y); ymax = Math.max(ymax, d.y); }
     }
   }
@@ -593,7 +601,8 @@ function render() {
   // Plot data
   for (const plot of state.plots) {
     if (!plot.visible || plot.data.length === 0) continue;
-    const pts = plot.data.map(d => dataToCanvas(d.x, d.y, area, bounds));
+    const xOff = plot.xOffset || 0;
+    const pts = plot.data.map(d => dataToCanvas(d.x + xOff, d.y, area, bounds));
     ctx.strokeStyle = plot.color;
     ctx.fillStyle = plot.color;
 
@@ -638,8 +647,8 @@ function render() {
       for (let i = 0; i < plot.data.length; i++) {
         const d = plot.data[i];
         if (d.yerr === undefined) continue;
-        const top = dataToCanvas(d.x, d.y + d.yerr, area, bounds);
-        const bot = dataToCanvas(d.x, d.y - d.yerr, area, bounds);
+        const top = dataToCanvas(d.x + xOff, d.y + d.yerr, area, bounds);
+        const bot = dataToCanvas(d.x + xOff, d.y - d.yerr, area, bounds);
         ctx.beginPath();
         ctx.moveTo(top.x, top.y); ctx.lineTo(bot.x, bot.y);
         ctx.moveTo(top.x - capW, top.y); ctx.lineTo(top.x + capW, top.y);
@@ -649,7 +658,15 @@ function render() {
     }
 
     if (plot.type === 'boxes') {
-      const barWidth = pts.length > 1 ? Math.max(4, Math.abs(pts[1].x - pts[0].x) * 0.7) : 30;
+      let barWidth;
+      if (plot.barWidth > 0) {
+        // Explicit bar width in data units → convert to pixels
+        const p0 = dataToCanvas(0, 0, area, bounds);
+        const p1 = dataToCanvas(plot.barWidth, 0, area, bounds);
+        barWidth = Math.abs(p1.x - p0.x);
+      } else {
+        barWidth = pts.length > 1 ? Math.max(4, Math.abs(pts[1].x - pts[0].x) * 0.7) : 30;
+      }
       const baseline = dataToCanvas(0, Math.max(bounds.ymin, 0), area, bounds);
       ctx.globalAlpha = plot.fillAlpha;
       for (const p of pts) {
@@ -1141,6 +1158,14 @@ function renderPlotProps(plot) {
       <input type="number" id="pp-fa" value="${plot.fillAlpha}" min="0" max="1" step="0.05">
     </div>
     <div class="prop-row">
+      <label>X Offset</label>
+      <input type="number" id="pp-xoff" value="${plot.xOffset}" step="any" title="Shift all x values (data units). Use to place bar charts side by side.">
+    </div>
+    <div class="prop-row">
+      <label>Bar Width</label>
+      <input type="number" id="pp-bw" value="${plot.barWidth}" step="any" min="0" title="0 = auto. Explicit width in data units for boxes.">
+    </div>
+    <div class="prop-row">
       <label>Visible</label>
       <input type="checkbox" id="pp-vis" ${plot.visible?'checked':''}>
     </div>
@@ -1194,6 +1219,8 @@ function syncPlotProps(plot) {
   plot.pointType = $('pp-pt').value;
   plot.dashType = $('pp-dash').value;
   plot.fillAlpha = +$('pp-fa').value;
+  plot.xOffset = +$('pp-xoff').value || 0;
+  plot.barWidth = +$('pp-bw').value || 0;
   plot.visible = $('pp-vis').checked;
   plot.smooth = $('pp-smooth').value;
   plot.hasErrorBars = $('pp-errbars').checked;
@@ -1501,6 +1528,13 @@ function generateGnuplotScript() {
       lines.push(`set style fill transparent solid ${avgAlpha.toFixed(2)}`);
     }
 
+    // Per-plot boxwidth: if any plot uses explicit barWidth, emit set boxwidth
+    // (gnuplot only has a global boxwidth, so we use the first non-zero one)
+    const firstBW = visPlots.find(p => p.type === 'boxes' && p.barWidth > 0);
+    if (firstBW) {
+      lines.push(`set boxwidth ${firstBW.barWidth} absolute`);
+    }
+
     visPlots.forEach((p) => {
       if (p.isFunction && p.funcExpr) {
         // Function plot — gnuplot can plot functions directly with domain
@@ -1522,11 +1556,14 @@ function generateGnuplotScript() {
         lines.push('EOD');
         lines.push('');
 
+        // Build the using clause with optional x offset
+        const xOff = p.xOffset || 0;
+        const col1 = xOff !== 0 ? `($1+${xOff})` : '1';
         let s = `$data${idx}`;
         if (p.hasErrorBars) {
-          s += ` using 1:2:3 with ${p.type === 'points' || p.type === 'linespoints' ? 'yerrorbars' : 'yerrorlines'}`;
+          s += ` using ${col1}:2:3 with ${p.type === 'points' || p.type === 'linespoints' ? 'yerrorbars' : 'yerrorlines'}`;
         } else {
-          s += ` using 1:2 with ${typeMap[p.type] || 'lines'}`;
+          s += ` using ${col1}:2 with ${typeMap[p.type] || 'lines'}`;
         }
         s += ` lc rgb "${p.color}" lw ${p.lineWidth}`;
         if (p.type === 'points' || p.type === 'linespoints') {
@@ -1758,6 +1795,7 @@ function saveProject() {
       dashType: p.dashType, fillAlpha: p.fillAlpha, rawData: p.rawData, visible: p.visible,
       isFunction: p.isFunction, funcExpr: p.funcExpr, funcXmin: p.funcXmin,
       funcXmax: p.funcXmax, funcSamples: p.funcSamples, hasErrorBars: p.hasErrorBars,
+      xOffset: p.xOffset, barWidth: p.barWidth,
     })),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
