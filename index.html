@@ -347,7 +347,7 @@ const state = {
   labelFontSize: 14,
   xaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
   yaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
-  key: { show: true, pos: 'top-right', box: true, fontSize: 11, horizontal: false, x: null, y: null },
+  key: { show: true, pos: 'top-right', box: true, fontSize: 11, horizontal: false, x: null, y: null, width: null },
   annotations: [], // [{text, x, y, fontSize, color}]
   customCommands: '',
   plots: [],
@@ -784,28 +784,50 @@ function render() {
   if (state.key.show && state.plots.some(p => p.visible)) {
     const visPlots = state.plots.filter(p => p.visible);
     const fontSize = state.key.fontSize;
-    const horiz = state.key.horizontal;
     ctx.font = `${fontSize}px sans-serif`;
 
     const swatchW = 22; // width of the line swatch
     const swatchGap = 6; // gap between swatch and text
-    const entryPadX = 12; // padding between entries (horizontal mode)
-    const entryPadY = fontSize + 6; // row height (vertical mode)
+    const entryPadX = 12; // padding between entries in a row
+    const rowH = fontSize + 6; // height of each row
     const boxPad = 5; // internal padding of legend box
 
     // Measure each entry width: swatch + gap + text
     const entryWidths = visPlots.map(p => swatchW + swatchGap + ctx.measureText(p.name).width);
 
-    let legendW, legendH;
-    if (horiz) {
-      // All entries in a single row
-      legendW = entryWidths.reduce((s, w) => s + w + entryPadX, 0) - entryPadX + boxPad * 2;
-      legendH = fontSize + boxPad * 2 + 4;
+    // Flow layout: pack entries into rows within the available width
+    // If key.width is set (by resize drag), use it; otherwise compute natural width
+    const userW = state.key.width; // null = auto
+    let targetInner; // inner width (excluding boxPad)
+    if (userW !== null) {
+      targetInner = Math.max(Math.max(...entryWidths), userW - boxPad * 2);
+    } else if (state.key.horizontal) {
+      // Legacy horizontal mode: all in one row
+      targetInner = entryWidths.reduce((s, w) => s + w + entryPadX, 0) - entryPadX;
     } else {
-      // Vertical stack
-      legendW = Math.max(...entryWidths) + boxPad * 2;
-      legendH = visPlots.length * entryPadY + boxPad * 2 - 2;
+      // Vertical: one entry per row
+      targetInner = Math.max(...entryWidths);
     }
+
+    // Build rows by flowing entries into targetInner width
+    const rows = []; // each row is an array of { plotIdx, x }
+    let curRow = [], curX = 0;
+    for (let i = 0; i < visPlots.length; i++) {
+      const w = entryWidths[i];
+      if (curRow.length > 0 && curX + entryPadX + w > targetInner + 0.5) {
+        rows.push(curRow);
+        curRow = []; curX = 0;
+      }
+      curRow.push({ idx: i, x: curX });
+      curX += w + entryPadX;
+    }
+    if (curRow.length > 0) rows.push(curRow);
+
+    const legendW = targetInner + boxPad * 2;
+    const legendH = rows.length * rowH + boxPad * 2 - 2;
+
+    // Auto-update horizontal flag based on layout
+    state.key.horizontal = (rows.length === 1 && visPlots.length > 1);
 
     let lx, ly;
     const pad = 10;
@@ -829,52 +851,38 @@ function render() {
       ctx.strokeStyle = '#999';
       ctx.lineWidth = 0.5;
       ctx.strokeRect(lx, ly, legendW, legendH);
+      // Draw resize grip on the right edge (3 small dots)
+      ctx.fillStyle = '#bbb';
+      const gx = lx + legendW - 3;
+      const gy = ly + legendH / 2;
+      for (let di = -4; di <= 4; di += 4) {
+        ctx.fillRect(gx, gy + di, 2, 2);
+      }
     }
 
-    if (horiz) {
-      // Horizontal layout: entries side by side
-      let cx = lx + boxPad;
-      const cy = ly + boxPad + 2;
-      visPlots.forEach((p, i) => {
+    // Draw entries row by row
+    rows.forEach((row, ri) => {
+      const ry = ly + boxPad + ri * rowH;
+      row.forEach(({ idx, x: ex }) => {
+        const p = visPlots[idx];
+        const drawX = lx + boxPad + ex;
         // Swatch line
         ctx.strokeStyle = p.color;
         ctx.fillStyle = p.color;
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(cx, cy + fontSize / 2);
-        ctx.lineTo(cx + swatchW, cy + fontSize / 2);
+        ctx.moveTo(drawX, ry + fontSize / 2);
+        ctx.lineTo(drawX + swatchW, ry + fontSize / 2);
         ctx.stroke();
-        drawPoint(cx + swatchW / 2, cy + fontSize / 2, p.pointType, 5, p.color);
+        drawPoint(drawX + swatchW / 2, ry + fontSize / 2, p.pointType, 5, p.color);
         // Text
         ctx.fillStyle = '#333';
         ctx.font = `${fontSize}px sans-serif`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        ctx.fillText(p.name, cx + swatchW + swatchGap, cy);
-        cx += entryWidths[i] + entryPadX;
+        ctx.fillText(p.name, drawX + swatchW + swatchGap, ry);
       });
-    } else {
-      // Vertical layout: entries stacked
-      visPlots.forEach((p, i) => {
-        const ex = lx + boxPad;
-        const ey = ly + boxPad + i * entryPadY;
-        // Swatch line
-        ctx.strokeStyle = p.color;
-        ctx.fillStyle = p.color;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(ex, ey + fontSize / 2);
-        ctx.lineTo(ex + swatchW, ey + fontSize / 2);
-        ctx.stroke();
-        drawPoint(ex + swatchW / 2, ey + fontSize / 2, p.pointType, 5, p.color);
-        // Text
-        ctx.fillStyle = '#333';
-        ctx.font = `${fontSize}px sans-serif`;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText(p.name, ex + swatchW + swatchGap, ey);
-      });
-    }
+    });
   }
 }
 
@@ -970,6 +978,7 @@ function syncPropsToState() {
   state.key.pos = $('key-pos').value;
   state.key.box = $('key-box').checked;
   state.key.horizontal = $('key-horiz').checked;
+  state.key.width = null; // reset custom width when toggling layout manually
   state.key.fontSize = +$('key-fontsize').value;
   // Enable/disable axis range inputs
   $('xaxis-min').disabled = state.xaxis.auto;
@@ -1301,9 +1310,19 @@ canvas.addEventListener('mousedown', (e) => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
 
-  // Check legend drag
+  // Check legend resize (right edge) or move (interior)
   if (state.key.show && state._keyRect) {
     const kr = state._keyRect;
+    const resizeEdge = 6;
+    // Right edge → resize width
+    if (mx >= kr.x + kr.w - resizeEdge && mx <= kr.x + kr.w + resizeEdge &&
+        my >= kr.y && my <= kr.y + kr.h) {
+      dragMode = 'legend-resize';
+      dragStart = { x: mx, y: my };
+      dragOriginal = { w: kr.w };
+      return;
+    }
+    // Interior → move
     if (mx >= kr.x && mx <= kr.x + kr.w && my >= kr.y && my <= kr.y + kr.h) {
       dragMode = 'legend';
       dragStart = { x: mx, y: my };
@@ -1390,7 +1409,11 @@ canvas.addEventListener('mousemove', (e) => {
       canvas.style.cursor = 'ew-resize';
     } else if (state.key.show && state._keyRect) {
       const kr = state._keyRect;
-      if (mx >= kr.x && mx <= kr.x + kr.w && my >= kr.y && my <= kr.y + kr.h) {
+      const resizeEdge = 6;
+      if (mx >= kr.x + kr.w - resizeEdge && mx <= kr.x + kr.w + resizeEdge &&
+          my >= kr.y && my <= kr.y + kr.h) {
+        canvas.style.cursor = 'ew-resize';
+      } else if (mx >= kr.x && mx <= kr.x + kr.w && my >= kr.y && my <= kr.y + kr.h) {
         canvas.style.cursor = 'move';
       } else {
         canvas.style.cursor = nearDataPoint(mx, my, area) ? 'grab' : 'crosshair';
@@ -1416,6 +1439,17 @@ canvas.addEventListener('mousemove', (e) => {
       const xOffEl = document.getElementById('pp-xoff');
       if (xOffEl) xOffEl.value = dragPlot.xOffset;
     }
+    render();
+    return;
+  }
+
+  if (dragMode === 'legend-resize') {
+    canvas.style.cursor = 'ew-resize';
+    const newW = Math.max(40, dragOriginal.w + (mx - dragStart.x));
+    state.key.width = Math.round(newW);
+    // Sync the horizontal checkbox in sidebar
+    const horizEl = document.getElementById('key-horiz');
+    if (horizEl) horizEl.checked = state.key.horizontal;
     render();
     return;
   }
@@ -1730,6 +1764,7 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
 function resetZoom() {
   state.key.x = null;
   state.key.y = null;
+  state.key.width = null;
   state.xaxis.auto = true;
   state.yaxis.auto = true;
   syncStateToProps();
