@@ -99,6 +99,14 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
 /* Checkbox */
 .prop-row input[type="checkbox"] { accent-color: #9cdcfe; }
 
+/* Lock button */
+.lock-btn {
+  background: none; border: 1px solid #3e3e3e; color: #888; cursor: pointer;
+  font-size: 12px; padding: 1px 5px; border-radius: 3px; line-height: 1; margin-left: auto;
+}
+.lock-btn:hover { border-color: #666; color: #ccc; }
+.lock-btn.locked { background: #3a3a00; border-color: #887700; color: #eec900; }
+
 /* Modal overlay */
 .modal-overlay {
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -256,7 +264,7 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
 
       <!-- Axis section -->
       <div class="prop-section">
-        <div class="prop-section-title">X Axis</div>
+        <div class="prop-section-title">X Axis <button class="lock-btn" id="xaxis-lock" title="Lock range to prevent accidental changes from pan/zoom">&#x1F513;</button></div>
         <div class="prop-section-body">
           <div class="prop-row"><label>Auto</label><input type="checkbox" id="xaxis-auto" checked></div>
           <div class="prop-row"><label>Min</label><input type="number" id="xaxis-min" step="any" disabled><label style="width:auto">Max</label><input type="number" id="xaxis-max" step="any" disabled></div>
@@ -265,7 +273,7 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
         </div>
       </div>
       <div class="prop-section">
-        <div class="prop-section-title">Y Axis</div>
+        <div class="prop-section-title">Y Axis <button class="lock-btn" id="yaxis-lock" title="Lock range to prevent accidental changes from pan/zoom">&#x1F513;</button></div>
         <div class="prop-section-body">
           <div class="prop-row"><label>Auto</label><input type="checkbox" id="yaxis-auto" checked></div>
           <div class="prop-row"><label>Min</label><input type="number" id="yaxis-min" step="any" disabled><label style="width:auto">Max</label><input type="number" id="yaxis-max" step="any" disabled></div>
@@ -393,8 +401,8 @@ const state = {
   margin: { top: 60, right: 40, bottom: 60, left: 70 },
   title: '', xlabel: '', ylabel: '',
   labelFontSize: 14,
-  xaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
-  yaxis: { auto: true, min: 0, max: 10, log: false, grid: true },
+  xaxis: { auto: true, min: 0, max: 10, log: false, grid: true, locked: false },
+  yaxis: { auto: true, min: 0, max: 10, log: false, grid: true, locked: false },
   key: { show: true, pos: 'top-right', box: true, fontSize: 11, horizontal: false, x: null, y: null, width: null },
   annotations: [], // [{text, x, y, fontSize, color}]
   customCommands: '',
@@ -430,6 +438,7 @@ function createPlot(name) {
     // Position offset & bar width
     xOffset: 0,    // shift all x values by this amount (data units)
     barWidth: 0,   // 0 = auto, otherwise explicit width in data units
+    offsetLocked: false, // prevent drag changes to xOffset
   };
 }
 
@@ -1091,14 +1100,18 @@ function syncPropsToState() {
   state.xlabel = $('lbl-xlabel').value;
   state.ylabel = $('lbl-ylabel').value;
   state.labelFontSize = +$('lbl-fontsize').value;
-  state.xaxis.auto = $('xaxis-auto').checked;
-  state.xaxis.min = +$('xaxis-min').value;
-  state.xaxis.max = +$('xaxis-max').value;
+  if (!state.xaxis.locked) {
+    state.xaxis.auto = $('xaxis-auto').checked;
+    state.xaxis.min = +$('xaxis-min').value;
+    state.xaxis.max = +$('xaxis-max').value;
+  }
   state.xaxis.log = $('xaxis-log').checked;
   state.xaxis.grid = $('xaxis-grid').checked;
-  state.yaxis.auto = $('yaxis-auto').checked;
-  state.yaxis.min = +$('yaxis-min').value;
-  state.yaxis.max = +$('yaxis-max').value;
+  if (!state.yaxis.locked) {
+    state.yaxis.auto = $('yaxis-auto').checked;
+    state.yaxis.min = +$('yaxis-min').value;
+    state.yaxis.max = +$('yaxis-max').value;
+  }
   state.yaxis.log = $('yaxis-log').checked;
   state.yaxis.grid = $('yaxis-grid').checked;
   state.key.show = $('key-show').checked;
@@ -1109,10 +1122,12 @@ function syncPropsToState() {
   state.key.horizontal = newHoriz;
   state.key.fontSize = +$('key-fontsize').value;
   // Enable/disable axis range inputs
-  $('xaxis-min').disabled = state.xaxis.auto;
-  $('xaxis-max').disabled = state.xaxis.auto;
-  $('yaxis-min').disabled = state.yaxis.auto;
-  $('yaxis-max').disabled = state.yaxis.auto;
+  $('xaxis-min').disabled = state.xaxis.auto || state.xaxis.locked;
+  $('xaxis-max').disabled = state.xaxis.auto || state.xaxis.locked;
+  $('xaxis-auto').disabled = state.xaxis.locked;
+  $('yaxis-min').disabled = state.yaxis.auto || state.yaxis.locked;
+  $('yaxis-max').disabled = state.yaxis.auto || state.yaxis.locked;
+  $('yaxis-auto').disabled = state.yaxis.locked;
 }
 
 function syncStateToProps() {
@@ -1143,16 +1158,41 @@ function syncStateToProps() {
   $('key-box').checked = state.key.box;
   $('key-horiz').checked = state.key.horizontal;
   $('key-fontsize').value = state.key.fontSize;
-  $('xaxis-min').disabled = state.xaxis.auto;
-  $('xaxis-max').disabled = state.xaxis.auto;
-  $('yaxis-min').disabled = state.yaxis.auto;
-  $('yaxis-max').disabled = state.yaxis.auto;
+  $('xaxis-min').disabled = state.xaxis.auto || state.xaxis.locked;
+  $('xaxis-max').disabled = state.xaxis.auto || state.xaxis.locked;
+  $('xaxis-auto').disabled = state.xaxis.locked;
+  $('yaxis-min').disabled = state.yaxis.auto || state.yaxis.locked;
+  $('yaxis-max').disabled = state.yaxis.auto || state.yaxis.locked;
+  $('yaxis-auto').disabled = state.yaxis.locked;
+  // Sync lock button appearance
+  const xlBtn = $('xaxis-lock');
+  xlBtn.textContent = state.xaxis.locked ? '\u{1F512}' : '\u{1F513}';
+  xlBtn.className = 'lock-btn' + (state.xaxis.locked ? ' locked' : '');
+  const ylBtn = $('yaxis-lock');
+  ylBtn.textContent = state.yaxis.locked ? '\u{1F512}' : '\u{1F513}';
+  ylBtn.className = 'lock-btn' + (state.yaxis.locked ? ' locked' : '');
 }
 
 // Listen to all property inputs
 document.querySelectorAll('#right-panel input, #right-panel select').forEach(el => {
   el.addEventListener('input', () => { syncPropsToState(); render(); });
   el.addEventListener('change', () => { syncPropsToState(); render(); });
+});
+
+// Axis lock buttons
+$('xaxis-lock').addEventListener('click', (e) => {
+  e.stopPropagation(); // don't trigger section collapse
+  state.xaxis.locked = !state.xaxis.locked;
+  syncStateToProps();
+  render();
+  $('status-text').textContent = state.xaxis.locked ? 'X axis range locked' : 'X axis range unlocked';
+});
+$('yaxis-lock').addEventListener('click', (e) => {
+  e.stopPropagation();
+  state.yaxis.locked = !state.yaxis.locked;
+  syncStateToProps();
+  render();
+  $('status-text').textContent = state.yaxis.locked ? 'Y axis range locked' : 'Y axis range unlocked';
 });
 
 // Data editor -> update selected plot
@@ -1305,11 +1345,12 @@ function renderPlotProps(plot) {
     </div>
     <div class="prop-row">
       <label>X Offset</label>
-      <input type="number" id="pp-xoff" value="${plot.xOffset}" step="any" title="Shift all x values (data units). Use to place bar charts side by side.">
+      <input type="number" id="pp-xoff" value="${plot.xOffset}" step="any" title="Shift all x values (data units). Use to place bar charts side by side." ${plot.offsetLocked?'disabled':''}>
+      <button class="lock-btn${plot.offsetLocked?' locked':''}" id="pp-off-lock" title="Lock offset to prevent accidental drag changes">${plot.offsetLocked?'\u{1F512}':'\u{1F513}'}</button>
     </div>
     <div class="prop-row">
       <label>Bar Width</label>
-      <input type="number" id="pp-bw" value="${plot.barWidth}" step="any" min="0" title="0 = auto. Explicit width in data units for boxes.">
+      <input type="number" id="pp-bw" value="${plot.barWidth}" step="any" min="0" title="0 = auto. Explicit width in data units for boxes." ${plot.offsetLocked?'disabled':''}>
     </div>
     <div class="prop-row">
       <label>Visible</label>
@@ -1353,6 +1394,15 @@ function renderPlotProps(plot) {
   body.querySelectorAll('input, select').forEach(el => {
     el.addEventListener('input', () => syncPlotProps(plot));
     el.addEventListener('change', () => syncPlotProps(plot));
+  });
+  // Offset lock button
+  $('pp-off-lock').addEventListener('click', () => {
+    plot.offsetLocked = !plot.offsetLocked;
+    renderPlotProps(plot);
+    render();
+    $('status-text').textContent = plot.offsetLocked
+      ? `Offset locked for "${plot.name}"`
+      : `Offset unlocked for "${plot.name}"`;
   });
 }
 
@@ -1432,7 +1482,7 @@ function nearDataPoint(mx, my, area) {
   const bounds = state._bounds;
   if (!bounds) return false;
   for (const plot of state.plots) {
-    if (!plot.visible || plot.data.length === 0) continue;
+    if (!plot.visible || plot.data.length === 0 || plot.offsetLocked) continue;
     const xOff = plot.xOffset || 0;
     for (const d of plot.data) {
       const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
@@ -1515,13 +1565,16 @@ canvas.addEventListener('mousedown', (e) => {
           }
         }
         if (bestPlot) {
-          dragMode = 'plot-offset';
-          dragPlot = bestPlot;
-          dragStart = { x: mx, y: my };
-          dragOriginal = { xOffset: bestPlot.xOffset || 0 };
           // Select this plot in the sidebar
           const idx = state.plots.indexOf(bestPlot);
           if (idx !== state.selectedPlot) selectPlot(idx);
+          // Only start drag if offset is not locked
+          if (!bestPlot.offsetLocked) {
+            dragMode = 'plot-offset';
+            dragPlot = bestPlot;
+            dragStart = { x: mx, y: my };
+            dragOriginal = { xOffset: bestPlot.xOffset || 0 };
+          }
           return;
         }
       }
@@ -1582,12 +1635,16 @@ canvas.addEventListener('mousemove', (e) => {
       const pxPerDataY = area.h / (dragOriginal.ymax - dragOriginal.ymin);
       const dx = (mx - dragStart.x) / pxPerDataX;
       const dy = (my - dragStart.y) / pxPerDataY;
-      state.xaxis.auto = false;
-      state.yaxis.auto = false;
-      state.xaxis.min = Math.round(dragOriginal.xmin - dx);
-      state.xaxis.max = Math.round(dragOriginal.xmax - dx);
-      state.yaxis.min = Math.round(dragOriginal.ymin + dy);
-      state.yaxis.max = Math.round(dragOriginal.ymax + dy);
+      if (!state.xaxis.locked) {
+        state.xaxis.auto = false;
+        state.xaxis.min = Math.round(dragOriginal.xmin - dx);
+        state.xaxis.max = Math.round(dragOriginal.xmax - dx);
+      }
+      if (!state.yaxis.locked) {
+        state.yaxis.auto = false;
+        state.yaxis.min = Math.round(dragOriginal.ymin + dy);
+        state.yaxis.max = Math.round(dragOriginal.ymax + dy);
+      }
       syncStateToProps();
     }
     render();
@@ -2063,7 +2120,7 @@ function saveProject() {
       dashType: p.dashType, fillAlpha: p.fillAlpha, rawData: p.rawData, visible: p.visible,
       isFunction: p.isFunction, funcExpr: p.funcExpr, funcXmin: p.funcXmin,
       funcXmax: p.funcXmax, funcSamples: p.funcSamples, hasErrorBars: p.hasErrorBars,
-      xOffset: p.xOffset, barWidth: p.barWidth,
+      xOffset: p.xOffset, barWidth: p.barWidth, offsetLocked: p.offsetLocked,
     })),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -2162,7 +2219,7 @@ function scheduleAutoSave() {
           dashType: p.dashType, fillAlpha: p.fillAlpha, rawData: p.rawData, visible: p.visible,
           smooth: p.smooth, isFunction: p.isFunction, funcExpr: p.funcExpr,
           funcXmin: p.funcXmin, funcXmax: p.funcXmax, funcSamples: p.funcSamples,
-          hasErrorBars: p.hasErrorBars, xOffset: p.xOffset, barWidth: p.barWidth,
+          hasErrorBars: p.hasErrorBars, xOffset: p.xOffset, barWidth: p.barWidth, offsetLocked: p.offsetLocked,
         })),
       };
       localStorage.setItem('gnuplot-studio-autosave', JSON.stringify(data));
@@ -2195,17 +2252,24 @@ canvas.addEventListener('wheel', (e) => {
   const dPos = canvasToData(mx, my, area, bounds);
 
   // Zoom around cursor position — round to integers for cleaner range values
+  // Respect axis locks
+  if (state.xaxis.locked && state.yaxis.locked) return;
+
   const newXmin = Math.round(dPos.x - (dPos.x - bounds.xmin) * factor);
   const newXmax = Math.round(dPos.x + (bounds.xmax - dPos.x) * factor);
   const newYmin = Math.round(dPos.y - (dPos.y - bounds.ymin) * factor);
   const newYmax = Math.round(dPos.y + (bounds.ymax - dPos.y) * factor);
 
-  state.xaxis.auto = false;
-  state.yaxis.auto = false;
-  state.xaxis.min = newXmin;
-  state.xaxis.max = newXmax;
-  state.yaxis.min = newYmin;
-  state.yaxis.max = newYmax;
+  if (!state.xaxis.locked) {
+    state.xaxis.auto = false;
+    state.xaxis.min = newXmin;
+    state.xaxis.max = newXmax;
+  }
+  if (!state.yaxis.locked) {
+    state.yaxis.auto = false;
+    state.yaxis.min = newYmin;
+    state.yaxis.max = newYmax;
+  }
   syncStateToProps();
   render();
 }, { passive: false });
