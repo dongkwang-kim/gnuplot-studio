@@ -1923,11 +1923,11 @@ canvas.addEventListener('wheel', (e) => {
   const factor = e.deltaY > 0 ? 1.15 : 1/1.15;
   const dPos = canvasToData(mx, my, area, bounds);
 
-  // Zoom around cursor position
-  const newXmin = dPos.x - (dPos.x - bounds.xmin) * factor;
-  const newXmax = dPos.x + (bounds.xmax - dPos.x) * factor;
-  const newYmin = dPos.y - (dPos.y - bounds.ymin) * factor;
-  const newYmax = dPos.y + (bounds.ymax - dPos.y) * factor;
+  // Zoom around cursor position — round to integers for cleaner range values
+  const newXmin = Math.round(dPos.x - (dPos.x - bounds.xmin) * factor);
+  const newXmax = Math.round(dPos.x + (bounds.xmax - dPos.x) * factor);
+  const newYmin = Math.round(dPos.y - (dPos.y - bounds.ymin) * factor);
+  const newYmax = Math.round(dPos.y + (bounds.ymax - dPos.y) * factor);
 
   state.xaxis.auto = false;
   state.yaxis.auto = false;
