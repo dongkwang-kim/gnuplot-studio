@@ -1277,9 +1277,24 @@ function addFunctionPlot() {
 // ============================================================
 // CANVAS MOUSE INTERACTIONS
 // ============================================================
-let dragMode = null; // 'legend', 'margin-top', 'margin-bottom', 'margin-left', 'margin-right'
+let dragMode = null; // 'legend', 'margin-top/bottom/left/right', 'plot-offset'
 let dragStart = { x: 0, y: 0 };
 let dragOriginal = {};
+let dragPlot = null; // the plot being offset-dragged
+
+function nearDataPoint(mx, my, area) {
+  const bounds = state._bounds;
+  if (!bounds) return false;
+  for (const plot of state.plots) {
+    if (!plot.visible || plot.data.length === 0) continue;
+    const xOff = plot.xOffset || 0;
+    for (const d of plot.data) {
+      const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
+      if (Math.hypot(cp.x - mx, cp.y - my) < 20) return true;
+    }
+  }
+  return false;
+}
 
 canvas.addEventListener('mousedown', (e) => {
   const rect = canvas.getBoundingClientRect();
@@ -1312,6 +1327,37 @@ canvas.addEventListener('mousedown', (e) => {
     }
     if (mx >= area.x + area.w - edge && mx <= area.x + area.w + edge && my >= area.y && my <= area.y + area.h) {
       dragMode = 'margin-right'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.right }; return;
+    }
+
+    // Check plot-offset drag: click near a data point inside plot area
+    if (mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) {
+      const bounds = state._bounds;
+      if (bounds) {
+        let bestDist = 20; // max pixel distance to grab
+        let bestPlot = null;
+        for (const plot of state.plots) {
+          if (!plot.visible || plot.data.length === 0) continue;
+          const xOff = plot.xOffset || 0;
+          for (const d of plot.data) {
+            const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
+            const dist = Math.hypot(cp.x - mx, cp.y - my);
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestPlot = plot;
+            }
+          }
+        }
+        if (bestPlot) {
+          dragMode = 'plot-offset';
+          dragPlot = bestPlot;
+          dragStart = { x: mx, y: my };
+          dragOriginal = { xOffset: bestPlot.xOffset || 0 };
+          // Select this plot in the sidebar
+          const idx = state.plots.indexOf(bestPlot);
+          if (idx !== state.selectedPlot) selectPlot(idx);
+          return;
+        }
+      }
     }
   }
 });
@@ -1347,14 +1393,32 @@ canvas.addEventListener('mousemove', (e) => {
       if (mx >= kr.x && mx <= kr.x + kr.w && my >= kr.y && my <= kr.y + kr.h) {
         canvas.style.cursor = 'move';
       } else {
-        canvas.style.cursor = 'crosshair';
+        canvas.style.cursor = nearDataPoint(mx, my, area) ? 'grab' : 'crosshair';
       }
     } else {
-      canvas.style.cursor = 'crosshair';
+      canvas.style.cursor = nearDataPoint(mx, my, area) ? 'grab' : 'crosshair';
     }
   }
 
   if (!dragMode) return;
+
+  if (dragMode === 'plot-offset' && dragPlot) {
+    canvas.style.cursor = 'grabbing';
+    const area = state._area;
+    const bounds = state._bounds;
+    if (area && bounds) {
+      // Convert pixel delta to data-unit delta
+      const dStart = canvasToData(dragStart.x, dragStart.y, area, bounds);
+      const dNow = canvasToData(mx, my, area, bounds);
+      const deltaX = dNow.x - dStart.x;
+      dragPlot.xOffset = Math.round((dragOriginal.xOffset + deltaX) * 100) / 100;
+      // Sync sidebar input if this plot is selected
+      const xOffEl = document.getElementById('pp-xoff');
+      if (xOffEl) xOffEl.value = dragPlot.xOffset;
+    }
+    render();
+    return;
+  }
 
   if (dragMode === 'legend') {
     state.key.x = dragOriginal.x + (mx - dragStart.x);
@@ -1381,8 +1445,8 @@ canvas.addEventListener('mousemove', (e) => {
   render();
 });
 
-canvas.addEventListener('mouseup', () => { dragMode = null; });
-canvas.addEventListener('mouseleave', () => { dragMode = null; });
+canvas.addEventListener('mouseup', () => { dragMode = null; dragPlot = null; });
+canvas.addEventListener('mouseleave', () => { dragMode = null; dragPlot = null; });
 
 // Double-click to add annotation
 canvas.addEventListener('dblclick', (e) => {
