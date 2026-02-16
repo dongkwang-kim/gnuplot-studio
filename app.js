@@ -871,6 +871,17 @@ function showSelectedDs() {
   const ds = state.dataSources.find(d => d.id === dsId);
   dataEditor.value = ds ? ds.rawData : '';
   dataEditor.disabled = !ds;
+  // Show data source info (columns, rows)
+  const infoEl = document.getElementById('ds-info');
+  if (infoEl) {
+    if (ds && ds.rows.length > 0) {
+      infoEl.textContent = `${ds.headers.length} columns, ${ds.rows.length} rows`;
+    } else if (ds) {
+      infoEl.textContent = 'No data rows';
+    } else {
+      infoEl.textContent = '';
+    }
+  }
 }
 
 dsSelector.addEventListener('change', showSelectedDs);
@@ -884,6 +895,13 @@ dataEditor.addEventListener('input', () => {
     const parsed = parseDataSource(ds.rawData);
     ds.headers = parsed.headers;
     ds.rows = parsed.rows;
+    // Update ds-info display
+    const infoEl = document.getElementById('ds-info');
+    if (infoEl) {
+      infoEl.textContent = ds.rows.length > 0
+        ? `${ds.headers.length} columns, ${ds.rows.length} rows`
+        : 'No data rows';
+    }
     // Re-render plot props if selected plot uses this data source (columns may have changed)
     if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
       const plot = state.plots[state.selectedPlot];
@@ -988,16 +1006,25 @@ function renderPlotProps(plot) {
     `<option value="${ds.id}" ${ds.id===plot.dataSourceId?'selected':''}>${ds.name.replace(/</g,'&lt;')}</option>`
   ).join('');
   const cols = getDataSourceColumns(plot);
+  // Display 1-indexed column numbers to match gnuplot convention (using 1:2)
   const colXOpts = cols.map((h, i) =>
-    `<option value="${i}" ${i===plot.usingX?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+    `<option value="${i}" ${i===plot.usingX?'selected':''}>${i+1}: ${h.replace(/</g,'&lt;')}</option>`
   ).join('');
   const colYOpts = cols.map((h, i) =>
-    `<option value="${i}" ${i===plot.usingY?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+    `<option value="${i}" ${i===plot.usingY?'selected':''}>${i+1}: ${h.replace(/</g,'&lt;')}</option>`
   ).join('');
   const colYerrOpts = `<option value="-1" ${plot.usingYerr==null||plot.usingYerr<0?'selected':''}>None</option>` +
     cols.map((h, i) =>
-      `<option value="${i}" ${i===plot.usingYerr?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+      `<option value="${i}" ${i===plot.usingYerr?'selected':''}>${i+1}: ${h.replace(/</g,'&lt;')}</option>`
     ).join('');
+  // Build gnuplot using clause preview
+  const usingX1 = plot.usingX + 1;
+  const usingY1 = plot.usingY + 1;
+  let usingPreview = `using ${usingX1}:${usingY1}`;
+  if (plot.usingYerr != null && plot.usingYerr >= 0) usingPreview += `:${plot.usingYerr + 1}`;
+  const dsForPreview = state.dataSources.find(d => d.id === plot.dataSourceId);
+  const dsNamePreview = dsForPreview ? `'${dsForPreview.name}'` : "'...'";
+  const gpPreview = `plot ${dsNamePreview} ${usingPreview}`;
   const isFunc = plot.isFunction;
   body.innerHTML = `
     <div class="prop-row">
@@ -1005,18 +1032,21 @@ function renderPlotProps(plot) {
       <input type="text" id="pp-name" value="${escapedName}">
     </div>
     <div class="prop-row" ${isFunc?'style="display:none"':''}>
-      <label>Source</label>
+      <label>Data</label>
       <select id="pp-ds">${dsOpts}</select>
     </div>
     <div class="prop-row" ${isFunc?'style="display:none"':''}>
-      <label>using X</label>
-      <select id="pp-col-x">${colXOpts}</select>
-      <label style="width:auto">Y</label>
-      <select id="pp-col-y">${colYOpts}</select>
+      <label>using</label>
+      <select id="pp-col-x" title="X column (gnuplot 1-indexed)">${colXOpts}</select>
+      <span style="color:#9cdcfe;font-family:Consolas,monospace;font-size:12px">:</span>
+      <select id="pp-col-y" title="Y column (gnuplot 1-indexed)">${colYOpts}</select>
     </div>
     <div class="prop-row" ${isFunc?'style="display:none"':''}>
       <label>Y Error</label>
-      <select id="pp-col-yerr">${colYerrOpts}</select>
+      <select id="pp-col-yerr" title="Error bar column (gnuplot 1-indexed)">${colYerrOpts}</select>
+    </div>
+    <div style="padding:2px 0 6px;font-family:Consolas,monospace;font-size:11px;color:#888${isFunc?';display:none':''}">
+      <span style="color:#666">&rarr;</span> <span style="color:#9cdcfe" id="pp-using-preview">${gpPreview.replace(/</g,'&lt;')}</span>
     </div>
     <div class="prop-row">
       <label>Type</label>
@@ -1163,9 +1193,24 @@ function syncPlotProps(plot) {
     renderPlotProps(plot);
     dsSelector.value = plot.dataSourceId;
     showSelectedDs();
+  } else {
+    // Update the using preview even when data source didn't change
+    updateUsingPreview(plot);
   }
   renderPlotList();
   render();
+}
+
+function updateUsingPreview(plot) {
+  const el = document.getElementById('pp-using-preview');
+  if (!el || plot.isFunction) return;
+  const usingX1 = plot.usingX + 1;
+  const usingY1 = plot.usingY + 1;
+  let usingClause = `using ${usingX1}:${usingY1}`;
+  if (plot.usingYerr != null && plot.usingYerr >= 0) usingClause += `:${plot.usingYerr + 1}`;
+  const ds = state.dataSources.find(d => d.id === plot.dataSourceId);
+  const dsName = ds ? `'${ds.name}'` : "'...'";
+  el.textContent = `plot ${dsName} ${usingClause}`;
 }
 
 // ============================================================
@@ -1184,6 +1229,33 @@ function addPlot() {
   render();
   renderPlotList();
   $('status-text').textContent = `Added plot: ${plot.name}`;
+}
+
+function addPlotFromSource() {
+  // Add a new plot referencing the currently selected data source (like gnuplot's multiple using clauses)
+  const dsId = +dsSelector.value;
+  const ds = state.dataSources.find(d => d.id === dsId);
+  if (!ds) {
+    $('status-text').textContent = 'No data source selected';
+    return;
+  }
+  const plot = createPlot();
+  plot.dataSourceId = ds.id;
+  plot.usingX = 0;
+  // Auto-pick the next unused Y column if possible
+  const usedYcols = state.plots.filter(p => p.dataSourceId === ds.id).map(p => p.usingY);
+  let nextY = 1;
+  for (let i = 1; i < ds.headers.length; i++) {
+    if (!usedYcols.includes(i)) { nextY = i; break; }
+  }
+  plot.usingY = nextY;
+  plot.name = ds.headers[nextY] || `col${nextY + 1}`;
+  state.plots.push(plot);
+  renderDsSelector();
+  selectPlot(state.plots.length - 1);
+  render();
+  renderPlotList();
+  $('status-text').textContent = `Added plot "${plot.name}" from "${ds.name}" using ${plot.usingX + 1}:${plot.usingY + 1}`;
 }
 
 function addFunctionPlot() {
@@ -1687,8 +1759,18 @@ function importData() {
   const text = $('import-text').value.trim();
   if (!text) return;
 
+  // Name from filename or generate a unique "Imported N" name
+  let baseName = _importFileName || 'Imported';
+  _importFileName = '';
+  // Ensure unique name: append counter if name already exists
+  let dsName = baseName;
+  let counter = 2;
+  while (state.dataSources.some(d => d.name === dsName)) {
+    dsName = `${baseName} (${counter++})`;
+  }
+
   // Create a single shared data source from imported text
-  const ds = createDataSource('Imported', text);
+  const ds = createDataSource(dsName, text);
   state.dataSources.push(ds);
 
   // Create one plot per Y column, all referencing the same data source
@@ -1709,9 +1791,11 @@ function importData() {
   $('status-text').textContent = `Imported ${numCols - 1} plot(s) from data source "${ds.name}"`;
 }
 
+let _importFileName = '';
 function loadFile(e) {
   const file = e.target.files[0];
   if (!file) return;
+  _importFileName = file.name.replace(/\.[^.]+$/, ''); // Store filename without extension
   const reader = new FileReader();
   reader.onload = () => { $('import-text').value = reader.result; };
   reader.readAsText(file);
