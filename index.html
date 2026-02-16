@@ -412,7 +412,6 @@ const state = {
   dataSources: [], // [{id, name, rawData, headers, rows}]
   plots: [],
   selectedPlot: -1,
-  selectedDataSource: -1, // index into dataSources for left-panel editor
 };
 
 let plotIdCounter = 0;
@@ -1169,6 +1168,7 @@ function syncPropsToState() {
   if (newHoriz !== state.key.horizontal) state.key.width = null; // reset custom width only when toggling
   state.key.horizontal = newHoriz;
   state.key.fontSize = +$('key-fontsize').value;
+  state.customCommands = $('custom-commands').value;
   // Enable/disable axis range inputs
   $('xaxis-min').disabled = state.xaxis.auto || state.xaxis.locked;
   $('xaxis-max').disabled = state.xaxis.auto || state.xaxis.locked;
@@ -1206,6 +1206,7 @@ function syncStateToProps() {
   $('key-box').checked = state.key.box;
   $('key-horiz').checked = state.key.horizontal;
   $('key-fontsize').value = state.key.fontSize;
+  $('custom-commands').value = state.customCommands;
   $('xaxis-min').disabled = state.xaxis.auto || state.xaxis.locked;
   $('xaxis-max').disabled = state.xaxis.auto || state.xaxis.locked;
   $('xaxis-auto').disabled = state.xaxis.locked;
@@ -1222,7 +1223,7 @@ function syncStateToProps() {
 }
 
 // Listen to all property inputs
-document.querySelectorAll('#right-panel input, #right-panel select').forEach(el => {
+document.querySelectorAll('#right-panel input, #right-panel select, #right-panel textarea').forEach(el => {
   el.addEventListener('input', () => { syncPropsToState(); render(); });
   el.addEventListener('change', () => { syncPropsToState(); render(); });
 });
@@ -1482,10 +1483,6 @@ function renderPlotProps(plot) {
         <option value="bezier" ${plot.smooth==='bezier'?'selected':''}>Bezier</option>
         <option value="acsplines" ${plot.smooth==='acsplines'?'selected':''}>A-C-Splines</option>
       </select>
-    </div>
-    <div class="prop-row">
-      <label>Error Bars</label>
-      <input type="checkbox" id="pp-errbars" ${plot.hasErrorBars?'checked':''}>
     </div>
     <div style="border-top:1px solid #3e3e3e;margin:8px 0;padding-top:8px">
       <div class="prop-row">
@@ -1952,7 +1949,7 @@ function generateGnuplotScript() {
   });
 
   // Custom commands
-  const customCmd = ($('custom-commands') || {}).value || state.customCommands || '';
+  const customCmd = state.customCommands || '';
   if (customCmd.trim()) {
     lines.push('');
     lines.push('# Custom commands');
@@ -2150,6 +2147,8 @@ function getStateSnapshot() {
     labelFontSize: state.labelFontSize,
     xaxis: {...state.xaxis}, yaxis: {...state.yaxis},
     key: {...state.key},
+    annotations: state.annotations.map(a => ({...a})),
+    customCommands: state.customCommands,
     dataSources: state.dataSources.map(ds => ({id: ds.id, name: ds.name, rawData: ds.rawData})),
     plots: state.plots.map(p => ({...p})),
     selectedPlot: state.selectedPlot,
@@ -2179,6 +2178,12 @@ function restoreSnapshot(json) {
   Object.assign(state.xaxis, s.xaxis);
   Object.assign(state.yaxis, s.yaxis);
   Object.assign(state.key, s.key);
+  if (s.annotations) state.annotations = s.annotations;
+  if (s.customCommands !== undefined) {
+    state.customCommands = s.customCommands;
+    const cmdEl = $('custom-commands');
+    if (cmdEl) cmdEl.value = s.customCommands;
+  }
   if (s.dataSources) {
     state.dataSources = s.dataSources.map(ds => {
       const created = createDataSource(ds.name, ds.rawData);
@@ -2192,6 +2197,7 @@ function restoreSnapshot(json) {
   syncStateToProps();
   renderPlotList();
   renderDsSelector();
+  renderAnnotationList();
   selectPlot(state.selectedPlot);
   render();
   undoSuspended = false;
@@ -2259,6 +2265,8 @@ function saveProject() {
     title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
     labelFontSize: state.labelFontSize,
     xaxis: state.xaxis, yaxis: state.yaxis, key: state.key,
+    annotations: state.annotations,
+    customCommands: state.customCommands,
     dataSources: state.dataSources.map(ds => ({
       id: ds.id, name: ds.name, rawData: ds.rawData,
     })),
@@ -2315,6 +2323,12 @@ function applyProjectData(data) {
   if (data.xaxis) Object.assign(state.xaxis, data.xaxis);
   if (data.yaxis) Object.assign(state.yaxis, data.yaxis);
   if (data.key) Object.assign(state.key, data.key);
+  if (data.annotations) state.annotations = data.annotations;
+  if (data.customCommands !== undefined) {
+    state.customCommands = data.customCommands;
+    const cmdEl = $('custom-commands');
+    if (cmdEl) cmdEl.value = data.customCommands;
+  }
 
   if (data.dataSources) {
     state.dataSources = data.dataSources.map(ds => {
@@ -2338,6 +2352,7 @@ function applyProjectData(data) {
   syncStateToProps();
   renderPlotList();
   renderDsSelector();
+  renderAnnotationList();
   selectPlot(state.selectedPlot);
   render();
 }
@@ -2369,6 +2384,8 @@ function scheduleAutoSave() {
         title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
         labelFontSize: state.labelFontSize,
         xaxis: state.xaxis, yaxis: state.yaxis, key: state.key,
+        annotations: state.annotations,
+        customCommands: state.customCommands,
         dataSources: state.dataSources.map(ds => ({
           id: ds.id, name: ds.name, rawData: ds.rawData,
         })),
