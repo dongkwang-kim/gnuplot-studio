@@ -1,0 +1,2163 @@
+// ============================================================
+// STATE
+// ============================================================
+const COLORS = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'];
+
+const state = {
+  figure: { width: 800, height: 600, bg: '#ffffff', terminal: 'pngcairo' },
+  margin: { top: 60, right: 40, bottom: 60, left: 70 },
+  title: '', xlabel: '', ylabel: '',
+  labelFontSize: 14,
+  xaxis: { auto: true, min: 0, max: 10, log: false, grid: true, locked: false },
+  yaxis: { auto: true, min: 0, max: 10, log: false, grid: true, locked: false },
+  key: { show: true, pos: 'top-right', box: true, fontSize: 11, horizontal: false, x: null, y: null, width: null },
+  annotations: [], // [{text, x, y, fontSize, color}]
+  customCommands: '',
+  dataSources: [], // [{id, name, rawData, headers, rows}]
+  plots: [],
+  selectedPlot: -1,
+};
+
+let plotIdCounter = 0;
+let dsIdCounter = 0;
+
+function parseDataSource(text) {
+  const lines = text.split('\n');
+  const dataLines = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    dataLines.push(trimmed);
+  }
+  if (dataLines.length === 0) return { headers: [], rows: [] };
+  const firstParts = dataLines[0].split(/[,\t\s]+/);
+  const hasHeader = firstParts.some(p => isNaN(Number(p)));
+  const startRow = hasHeader ? 1 : 0;
+  const headers = hasHeader ? firstParts : firstParts.map((_, i) => `col${i + 1}`);
+  const rows = [];
+  for (let i = startRow; i < dataLines.length; i++) {
+    const parts = dataLines[i].split(/[,\t\s]+/).map(Number);
+    if (parts.length >= 2 && parts.every(isFinite)) rows.push(parts);
+  }
+  return { headers, rows };
+}
+
+function createDataSource(name, rawData) {
+  const parsed = parseDataSource(rawData || '');
+  return {
+    id: dsIdCounter++,
+    name: name || `Data ${state.dataSources.length + 1}`,
+    rawData: rawData || '',
+    headers: parsed.headers,
+    rows: parsed.rows,
+  };
+}
+
+function getPlotData(plot) {
+  if (plot.isFunction && plot.funcExpr) {
+    return evalFunction(plot.funcExpr, plot.funcXmin, plot.funcXmax, plot.funcSamples);
+  }
+  if (plot.dataSourceId == null) return [];
+  const ds = state.dataSources.find(d => d.id === plot.dataSourceId);
+  if (!ds || ds.rows.length === 0) return [];
+  const data = [];
+  for (const row of ds.rows) {
+    if (plot.usingX < row.length && plot.usingY < row.length &&
+        isFinite(row[plot.usingX]) && isFinite(row[plot.usingY])) {
+      const pt = { x: row[plot.usingX], y: row[plot.usingY] };
+      if (plot.usingYerr != null && plot.usingYerr >= 0 && plot.usingYerr < row.length)
+        pt.yerr = row[plot.usingYerr];
+      data.push(pt);
+    }
+  }
+  return data;
+}
+
+function getDataSourceColumns(plot) {
+  if (plot.dataSourceId == null) return [];
+  const ds = state.dataSources.find(d => d.id === plot.dataSourceId);
+  return ds ? ds.headers : [];
+}
+
+function createPlot(name) {
+  return {
+    id: plotIdCounter++,
+    name: name || `Plot ${state.plots.length + 1}`,
+    type: 'linespoints',
+    color: COLORS[state.plots.length % COLORS.length],
+    lineWidth: 2,
+    pointSize: 4,
+    pointType: 'circle',
+    dashType: 'solid',
+    fillAlpha: 0.3,
+    smooth: 'none',
+    visible: true,
+    // Data source reference (gnuplot-like)
+    dataSourceId: null, // references a data source by id
+    usingX: 0,         // column index for X
+    usingY: 1,         // column index for Y
+    usingYerr: null,    // column index for Y error (null = none)
+    // Function plotting
+    isFunction: false,
+    funcExpr: '',
+    funcXmin: -10,
+    funcXmax: 10,
+    funcSamples: 200,
+    hasErrorBars: false,
+    xOffset: 0,
+    barWidth: 0,
+    offsetLocked: false,
+  };
+}
+
+// ============================================================
+// CANVAS & RENDERING
+// ============================================================
+const canvas = document.getElementById('plot-canvas');
+const ctx = canvas.getContext('2d');
+
+function getPlotArea() {
+  const m = state.margin;
+  return {
+    x: m.left, y: m.top,
+    w: state.figure.width - m.left - m.right,
+    h: state.figure.height - m.top - m.bottom,
+  };
+}
+
+function computeDataBounds() {
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+  for (const p of state.plots) {
+    if (!p.visible) continue;
+    const xOff = p.xOffset || 0;
+    const halfBar = (p.barWidth || 0) / 2;
+    for (const d of getPlotData(p)) {
+      if (isFinite(d.x)) {
+        xmin = Math.min(xmin, d.x + xOff - halfBar);
+        xmax = Math.max(xmax, d.x + xOff + halfBar);
+      }
+      if (isFinite(d.y)) { ymin = Math.min(ymin, d.y); ymax = Math.max(ymax, d.y); }
+    }
+  }
+  if (!isFinite(xmin)) { xmin = 0; xmax = 10; }
+  if (!isFinite(ymin)) { ymin = 0; ymax = 10; }
+  // Add padding
+  const xpad = (xmax - xmin) * 0.05 || 1;
+  const ypad = (ymax - ymin) * 0.05 || 1;
+  return { xmin: xmin - xpad, xmax: xmax + xpad, ymin: ymin - ypad, ymax: ymax + ypad };
+}
+
+function niceTickStep(range, maxTicks) {
+  const rough = range / maxTicks;
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / pow;
+  let step;
+  if (norm <= 1.5) step = 1;
+  else if (norm <= 3) step = 2;
+  else if (norm <= 7) step = 5;
+  else step = 10;
+  return step * pow;
+}
+
+function generateTicks(min, max, isLog) {
+  if (isLog) {
+    const ticks = [];
+    const start = Math.floor(Math.log10(Math.max(min, 1e-10)));
+    const end = Math.ceil(Math.log10(Math.max(max, 1e-10)));
+    for (let i = start; i <= end; i++) ticks.push(Math.pow(10, i));
+    return ticks;
+  }
+  const range = max - min;
+  const step = niceTickStep(range, 8);
+  const ticks = [];
+  let t = Math.ceil(min / step) * step;
+  while (t <= max + step * 0.001) {
+    ticks.push(t);
+    t += step;
+  }
+  return ticks;
+}
+
+function formatTick(v) {
+  if (Math.abs(v) < 1e-10) return '0';
+  if (Math.abs(v) >= 1e6 || (Math.abs(v) < 0.01 && v !== 0)) return v.toExponential(1);
+  // Remove trailing zeros
+  let s = v.toPrecision(6);
+  if (s.includes('.')) s = s.replace(/\.?0+$/, '');
+  return s;
+}
+
+function dataToCanvas(dx, dy, area, bounds) {
+  const { xmin, xmax, ymin, ymax } = bounds;
+  let nx, ny;
+  if (state.xaxis.log) {
+    nx = (Math.log10(Math.max(dx, 1e-10)) - Math.log10(Math.max(xmin, 1e-10))) /
+         (Math.log10(Math.max(xmax, 1e-10)) - Math.log10(Math.max(xmin, 1e-10)));
+  } else {
+    nx = (dx - xmin) / (xmax - xmin);
+  }
+  if (state.yaxis.log) {
+    ny = (Math.log10(Math.max(dy, 1e-10)) - Math.log10(Math.max(ymin, 1e-10))) /
+         (Math.log10(Math.max(ymax, 1e-10)) - Math.log10(Math.max(ymin, 1e-10)));
+  } else {
+    ny = (dy - ymin) / (ymax - ymin);
+  }
+  return { x: area.x + nx * area.w, y: area.y + area.h - ny * area.h };
+}
+
+function canvasToData(cx, cy, area, bounds) {
+  const { xmin, xmax, ymin, ymax } = bounds;
+  const nx = (cx - area.x) / area.w;
+  const ny = 1 - (cy - area.y) / area.h;
+  let x, y;
+  if (state.xaxis.log) {
+    const logMin = Math.log10(Math.max(xmin, 1e-10));
+    const logMax = Math.log10(Math.max(xmax, 1e-10));
+    x = Math.pow(10, logMin + nx * (logMax - logMin));
+  } else {
+    x = xmin + nx * (xmax - xmin);
+  }
+  if (state.yaxis.log) {
+    const logMin = Math.log10(Math.max(ymin, 1e-10));
+    const logMax = Math.log10(Math.max(ymax, 1e-10));
+    y = Math.pow(10, logMin + ny * (logMax - logMin));
+  } else {
+    y = ymin + ny * (ymax - ymin);
+  }
+  return { x, y };
+}
+
+function drawPoint(cx, cy, type, size, color) {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  const r = size / 2;
+  switch (type) {
+    case 'circle':
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); break;
+    case 'square':
+      ctx.fillRect(cx - r, cy - r, size, size); break;
+    case 'triangle':
+      ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx - r, cy + r); ctx.lineTo(cx + r, cy + r); ctx.closePath(); ctx.fill(); break;
+    case 'diamond':
+      ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); ctx.closePath(); ctx.fill(); break;
+    case 'cross':
+      ctx.beginPath(); ctx.moveTo(cx - r, cy - r); ctx.lineTo(cx + r, cy + r); ctx.moveTo(cx + r, cy - r); ctx.lineTo(cx - r, cy + r); ctx.stroke(); break;
+    case 'plus':
+      ctx.beginPath(); ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy); ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r); ctx.stroke(); break;
+    default:
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function setDash(dashType) {
+  switch (dashType) {
+    case 'dashed': ctx.setLineDash([8, 4]); break;
+    case 'dotted': ctx.setLineDash([2, 4]); break;
+    case 'dashdot': ctx.setLineDash([8, 4, 2, 4]); break;
+    default: ctx.setLineDash([]);
+  }
+}
+
+// Smooth curve interpolation: returns densified array of {x, y} canvas points
+function smoothPoints(pts, mode) {
+  if (pts.length < 3 || mode === 'none') return pts;
+  if (mode === 'bezier') {
+    // Catmull-Rom spline through all points
+    const out = [];
+    const steps = 12; // segments between each pair
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(i - 1, 0)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(i + 2, pts.length - 1)];
+      // Include t=0 only for the first segment (avoid duplicates at joins)
+      for (let t = (i === 0 ? 0 : 1); t <= steps; t++) {
+        const s = t / steps;
+        const s2 = s * s, s3 = s2 * s;
+        const x = 0.5 * ((2*p1.x) + (-p0.x+p2.x)*s + (2*p0.x-5*p1.x+4*p2.x-p3.x)*s2 + (-p0.x+3*p1.x-3*p2.x+p3.x)*s3);
+        const y = 0.5 * ((2*p1.y) + (-p0.y+p2.y)*s + (2*p0.y-5*p1.y+4*p2.y-p3.y)*s2 + (-p0.y+3*p1.y-3*p2.y+p3.y)*s3);
+        out.push({ x, y });
+      }
+    }
+    return out;
+  }
+  // csplines / acsplines: natural cubic spline interpolation
+  const n = pts.length;
+  // Solve for spline coefficients on x and y independently as a function of index
+  function cubicSpline(vals) {
+    const m = vals.length;
+    const a = vals.slice();
+    const b = new Float64Array(m), d = new Float64Array(m);
+    const c = new Float64Array(m);
+    const h = new Float64Array(m - 1);
+    for (let i = 0; i < m - 1; i++) h[i] = 1; // uniform parameterization
+    const alpha = new Float64Array(m);
+    for (let i = 1; i < m - 1; i++) alpha[i] = 3 * (a[i+1] - 2*a[i] + a[i-1]);
+    const l = new Float64Array(m), mu = new Float64Array(m), z = new Float64Array(m);
+    l[0] = 1;
+    for (let i = 1; i < m - 1; i++) {
+      l[i] = 4 - mu[i-1]; mu[i] = 1 / l[i]; z[i] = (alpha[i] - z[i-1]) / l[i];
+    }
+    l[m-1] = 1;
+    for (let j = m - 2; j >= 0; j--) {
+      c[j] = z[j] - mu[j] * c[j+1];
+      b[j] = (a[j+1] - a[j]) - (c[j+1] + 2*c[j]) / 3;
+      d[j] = (c[j+1] - c[j]) / 3;
+    }
+    return { a, b, c, d };
+  }
+  const sx = cubicSpline(pts.map(p => p.x));
+  const sy = cubicSpline(pts.map(p => p.y));
+  const out = [];
+  const steps = 12;
+  for (let i = 0; i < n - 1; i++) {
+    // Include t=0 only for the first segment (avoid duplicates at joins)
+    for (let t = (i === 0 ? 0 : 1); t <= steps; t++) {
+      const s = t / steps;
+      const x = sx.a[i] + sx.b[i]*s + sx.c[i]*s*s + sx.d[i]*s*s*s;
+      const y = sy.a[i] + sy.b[i]*s + sy.c[i]*s*s + sy.d[i]*s*s*s;
+      out.push({ x, y });
+    }
+  }
+  return out;
+}
+
+function render() {
+  const W = state.figure.width;
+  const H = state.figure.height;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  ctx.fillStyle = state.figure.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  const area = getPlotArea();
+
+  // Compute bounds
+  let bounds;
+  if (state.xaxis.auto || state.yaxis.auto) {
+    const auto = computeDataBounds();
+    bounds = {
+      xmin: state.xaxis.auto ? auto.xmin : state.xaxis.min,
+      xmax: state.xaxis.auto ? auto.xmax : state.xaxis.max,
+      ymin: state.yaxis.auto ? auto.ymin : state.yaxis.min,
+      ymax: state.yaxis.auto ? auto.ymax : state.yaxis.max,
+    };
+  } else {
+    bounds = { xmin: state.xaxis.min, xmax: state.xaxis.max, ymin: state.yaxis.min, ymax: state.yaxis.max };
+  }
+
+  // Store for mouse interaction
+  state._bounds = bounds;
+  state._area = area;
+
+  // Plot area background
+  ctx.fillStyle = '#fafafa';
+  ctx.fillRect(area.x, area.y, area.w, area.h);
+
+  // Empty state guidance
+  if (state.plots.length === 0) {
+    ctx.fillStyle = '#bbb';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const cx = area.x + area.w / 2, cy = area.y + area.h / 2;
+    ctx.fillText('Click "+ Data" or "+ f(x)" to add a plot', cx, cy - 20);
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#ccc';
+    ctx.fillText('Ctrl+N  new plot    Shift+drag  pan    Scroll  zoom    ?  shortcuts', cx, cy + 10);
+  }
+
+  // Grid
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(area.x, area.y, area.w, area.h);
+  ctx.clip();
+
+  if (state.xaxis.grid) {
+    const xticks = generateTicks(bounds.xmin, bounds.xmax, state.xaxis.log);
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 0.5;
+    for (const t of xticks) {
+      const p = dataToCanvas(t, bounds.ymin, area, bounds);
+      ctx.beginPath(); ctx.moveTo(p.x, area.y); ctx.lineTo(p.x, area.y + area.h); ctx.stroke();
+    }
+  }
+  if (state.yaxis.grid) {
+    const yticks = generateTicks(bounds.ymin, bounds.ymax, state.yaxis.log);
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 0.5;
+    for (const t of yticks) {
+      const p = dataToCanvas(bounds.xmin, t, area, bounds);
+      ctx.beginPath(); ctx.moveTo(area.x, p.y); ctx.lineTo(area.x + area.w, p.y); ctx.stroke();
+    }
+  }
+
+  // Plot data
+  for (const plot of state.plots) {
+    if (!plot.visible) continue;
+    const plotData = getPlotData(plot);
+    if (plotData.length === 0) continue;
+    const xOff = plot.xOffset || 0;
+    const pts = plotData.map(d => dataToCanvas(d.x + xOff, d.y, area, bounds));
+    ctx.strokeStyle = plot.color;
+    ctx.fillStyle = plot.color;
+
+    // Draw based on type
+    if (plot.type === 'lines' || plot.type === 'linespoints') {
+      const drawPts = (plot.smooth && plot.smooth !== 'none') ? smoothPoints(pts, plot.smooth) : pts;
+      setDash(plot.dashType);
+      ctx.lineWidth = plot.lineWidth;
+      ctx.beginPath();
+      let first = true;
+      for (const p of drawPts) {
+        if (first) { ctx.moveTo(p.x, p.y); first = false; }
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (plot.type === 'steps') {
+      setDash(plot.dashType);
+      ctx.lineWidth = plot.lineWidth;
+      ctx.beginPath();
+      for (let i = 0; i < pts.length; i++) {
+        if (i === 0) ctx.moveTo(pts[i].x, pts[i].y);
+        else {
+          ctx.lineTo(pts[i].x, pts[i - 1].y);
+          ctx.lineTo(pts[i].x, pts[i].y);
+        }
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (plot.type === 'points' || plot.type === 'linespoints') {
+      for (const p of pts) drawPoint(p.x, p.y, plot.pointType, plot.pointSize, plot.color);
+    }
+
+    // Error bars
+    if (plot.hasErrorBars) {
+      ctx.strokeStyle = plot.color;
+      ctx.lineWidth = 1;
+      const capW = 4;
+      for (let i = 0; i < plotData.length; i++) {
+        const d = plotData[i];
+        if (d.yerr === undefined) continue;
+        const top = dataToCanvas(d.x + xOff, d.y + d.yerr, area, bounds);
+        const bot = dataToCanvas(d.x + xOff, d.y - d.yerr, area, bounds);
+        ctx.beginPath();
+        ctx.moveTo(top.x, top.y); ctx.lineTo(bot.x, bot.y);
+        ctx.moveTo(top.x - capW, top.y); ctx.lineTo(top.x + capW, top.y);
+        ctx.moveTo(bot.x - capW, bot.y); ctx.lineTo(bot.x + capW, bot.y);
+        ctx.stroke();
+      }
+    }
+
+    if (plot.type === 'boxes') {
+      let barWidth;
+      if (plot.barWidth > 0) {
+        // Explicit bar width in data units → convert to pixels
+        const p0 = dataToCanvas(0, 0, area, bounds);
+        const p1 = dataToCanvas(plot.barWidth, 0, area, bounds);
+        barWidth = Math.abs(p1.x - p0.x);
+      } else {
+        barWidth = pts.length > 1 ? Math.max(4, Math.abs(pts[1].x - pts[0].x) * 0.7) : 30;
+      }
+      const baseline = dataToCanvas(0, Math.max(bounds.ymin, 0), area, bounds);
+      ctx.globalAlpha = plot.fillAlpha;
+      for (const p of pts) {
+        const h = baseline.y - p.y;
+        ctx.fillRect(p.x - barWidth / 2, p.y, barWidth, h);
+      }
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1;
+      for (const p of pts) {
+        const h = baseline.y - p.y;
+        ctx.strokeRect(p.x - barWidth / 2, p.y, barWidth, h);
+      }
+    }
+
+    if (plot.type === 'impulses') {
+      ctx.lineWidth = plot.lineWidth;
+      const baseline = dataToCanvas(0, Math.max(bounds.ymin, 0), area, bounds);
+      for (const p of pts) {
+        ctx.beginPath(); ctx.moveTo(p.x, baseline.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+      }
+    }
+
+    if (plot.type === 'fillcurves') {
+      const drawPts = (plot.smooth && plot.smooth !== 'none') ? smoothPoints(pts, plot.smooth) : pts;
+      const baseline = dataToCanvas(0, Math.max(bounds.ymin, 0), area, bounds);
+      ctx.globalAlpha = plot.fillAlpha;
+      ctx.beginPath();
+      ctx.moveTo(drawPts[0].x, baseline.y);
+      for (const p of drawPts) ctx.lineTo(p.x, p.y);
+      ctx.lineTo(drawPts[drawPts.length - 1].x, baseline.y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = plot.lineWidth;
+      ctx.beginPath();
+      let first = true;
+      for (const p of drawPts) {
+        if (first) { ctx.moveTo(p.x, p.y); first = false; } else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  // Axes border
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(area.x, area.y, area.w, area.h);
+
+  // X ticks + labels
+  const xticks = generateTicks(bounds.xmin, bounds.xmax, state.xaxis.log);
+  ctx.fillStyle = '#333';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (const t of xticks) {
+    const p = dataToCanvas(t, bounds.ymin, area, bounds);
+    if (p.x < area.x || p.x > area.x + area.w) continue;
+    ctx.beginPath(); ctx.moveTo(p.x, area.y + area.h); ctx.lineTo(p.x, area.y + area.h + 5); ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillText(formatTick(t), p.x, area.y + area.h + 7);
+  }
+
+  // Y ticks + labels
+  const yticks = generateTicks(bounds.ymin, bounds.ymax, state.yaxis.log);
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (const t of yticks) {
+    const p = dataToCanvas(bounds.xmin, t, area, bounds);
+    if (p.y < area.y || p.y > area.y + area.h) continue;
+    ctx.beginPath(); ctx.moveTo(area.x, p.y); ctx.lineTo(area.x - 5, p.y); ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillText(formatTick(t), area.x - 8, p.y);
+  }
+
+  // Title
+  if (state.title) {
+    ctx.fillStyle = '#222';
+    ctx.font = `bold ${state.labelFontSize + 2}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(state.title, area.x + area.w / 2, area.y - 10);
+  }
+
+  // X label
+  if (state.xlabel) {
+    ctx.fillStyle = '#333';
+    ctx.font = `${state.labelFontSize}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(state.xlabel, area.x + area.w / 2, area.y + area.h + 28);
+  }
+
+  // Y label
+  if (state.ylabel) {
+    ctx.save();
+    ctx.fillStyle = '#333';
+    ctx.font = `${state.labelFontSize}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.translate(area.x - 45, area.y + area.h / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(state.ylabel, 0, 0);
+    ctx.restore();
+  }
+
+  // Annotations
+  for (const ann of state.annotations) {
+    const p = dataToCanvas(ann.x, ann.y, area, bounds);
+    ctx.fillStyle = ann.color || '#333';
+    ctx.font = `${ann.fontSize || 12}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(ann.text, p.x, p.y);
+  }
+
+  // Legend
+  if (state.key.show && state.plots.some(p => p.visible)) {
+    const visPlots = state.plots.filter(p => p.visible);
+    const fontSize = state.key.fontSize;
+    ctx.font = `${fontSize}px sans-serif`;
+
+    const swatchW = 22; // width of the line swatch
+    const swatchGap = 6; // gap between swatch and text
+    const entryPadX = 12; // padding between entries in a row
+    const rowH = fontSize + 6; // height of each row
+    const boxPad = 5; // internal padding of legend box
+
+    // Measure each entry width: swatch + gap + text
+    const entryWidths = visPlots.map(p => swatchW + swatchGap + ctx.measureText(p.name).width);
+
+    // Flow layout: pack entries into rows within the available width
+    // If key.width is set (by resize drag), use it; otherwise compute natural width
+    const userW = state.key.width; // null = auto
+    let targetInner; // inner width (excluding boxPad)
+    if (userW !== null) {
+      targetInner = Math.max(Math.max(...entryWidths), userW - boxPad * 2);
+    } else if (state.key.horizontal) {
+      // Legacy horizontal mode: all in one row
+      targetInner = entryWidths.reduce((s, w) => s + w + entryPadX, 0) - entryPadX;
+    } else {
+      // Vertical: one entry per row
+      targetInner = Math.max(...entryWidths);
+    }
+
+    // Build rows by flowing entries into targetInner width
+    const rows = []; // each row is an array of { plotIdx, x }
+    let curRow = [], curX = 0;
+    for (let i = 0; i < visPlots.length; i++) {
+      const w = entryWidths[i];
+      if (curRow.length > 0 && curX + entryPadX + w > targetInner + 0.5) {
+        rows.push(curRow);
+        curRow = []; curX = 0;
+      }
+      curRow.push({ idx: i, x: curX });
+      curX += w + entryPadX;
+    }
+    if (curRow.length > 0) rows.push(curRow);
+
+    const legendW = targetInner + boxPad * 2;
+    const legendH = rows.length * rowH + boxPad * 2 - 2;
+
+    // Auto-update horizontal flag based on layout
+    state.key.horizontal = (rows.length === 1 && visPlots.length > 1);
+
+    let lx, ly;
+    const pad = 10;
+    switch (state.key.pos) {
+      case 'top-left': lx = area.x + pad; ly = area.y + pad; break;
+      case 'top-right': lx = area.x + area.w - legendW - pad; ly = area.y + pad; break;
+      case 'bottom-left': lx = area.x + pad; ly = area.y + area.h - legendH - pad; break;
+      case 'bottom-right': lx = area.x + area.w - legendW - pad; ly = area.y + area.h - legendH - pad; break;
+      case 'outside-right': lx = area.x + area.w + 10; ly = area.y + pad; break;
+      default: lx = area.x + area.w - legendW - pad; ly = area.y + pad;
+    }
+    // Use custom position if dragged
+    if (state.key.x !== null) { lx = state.key.x; ly = state.key.y; }
+
+    // Store for hit testing
+    state._keyRect = { x: lx, y: ly, w: legendW, h: legendH };
+
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillRect(lx, ly, legendW, legendH);
+    if (state.key.box) {
+      ctx.strokeStyle = '#999';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(lx, ly, legendW, legendH);
+      // Draw resize grip on the right edge (3 small dots)
+      ctx.fillStyle = '#bbb';
+      const gx = lx + legendW - 3;
+      const gy = ly + legendH / 2;
+      for (let di = -4; di <= 4; di += 4) {
+        ctx.fillRect(gx, gy + di, 2, 2);
+      }
+    }
+
+    // Draw entries row by row
+    rows.forEach((row, ri) => {
+      const ry = ly + boxPad + ri * rowH;
+      row.forEach(({ idx, x: ex }) => {
+        const p = visPlots[idx];
+        const drawX = lx + boxPad + ex;
+        // Swatch line
+        ctx.strokeStyle = p.color;
+        ctx.fillStyle = p.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(drawX, ry + fontSize / 2);
+        ctx.lineTo(drawX + swatchW, ry + fontSize / 2);
+        ctx.stroke();
+        drawPoint(drawX + swatchW / 2, ry + fontSize / 2, p.pointType, 5, p.color);
+        // Text
+        ctx.fillStyle = '#333';
+        ctx.font = `${fontSize}px sans-serif`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(p.name, drawX + swatchW + swatchGap, ry);
+      });
+    });
+  }
+}
+
+// ============================================================
+// FUNCTION EVALUATION (safe math expression)
+// ============================================================
+function evalFunction(expr, xmin, xmax, samples) {
+  const data = [];
+  const step = (xmax - xmin) / (samples - 1);
+  // Build a safe evaluator using Math functions
+  // Order matters: longer names first to avoid partial matches
+  const safeExpr = expr
+    .replace(/\bsin\b/g, 'Math.sin')
+    .replace(/\bcos\b/g, 'Math.cos')
+    .replace(/\btan\b/g, 'Math.tan')
+    .replace(/\basin\b/g, 'Math.asin')
+    .replace(/\bacos\b/g, 'Math.acos')
+    .replace(/\batan2?\b/g, 'Math.atan')
+    .replace(/\babs\b/g, 'Math.abs')
+    .replace(/\bsqrt\b/g, 'Math.sqrt')
+    .replace(/\blog10\b/g, 'Math.log10')
+    .replace(/\blog2\b/g, 'Math.log2')
+    .replace(/\blog\b/g, 'Math.log')
+    .replace(/\bexp\b/g, 'Math.exp')
+    .replace(/\bfloor\b/g, 'Math.floor')
+    .replace(/\bceil\b/g, 'Math.ceil')
+    .replace(/\bpow\b/g, 'Math.pow')
+    .replace(/\bPI\b/g, 'Math.PI')
+    .replace(/\bpi\b/g, 'Math.PI')
+    .replace(/(?<!\d)(?<!\d\.)\be\b(?!\d)/g, 'Math.E');
+  try {
+    const fn = new Function('x', 'return ' + safeExpr);
+    for (let i = 0; i < samples; i++) {
+      const x = xmin + i * step;
+      const y = fn(x);
+      if (isFinite(y)) data.push({ x, y });
+    }
+  } catch(e) {
+    // Return empty on error
+  }
+  return data;
+}
+
+// ============================================================
+// UI BINDINGS
+// ============================================================
+const $ = id => document.getElementById(id);
+const dataEditor = $('data-editor');
+
+function syncPropsToState() {
+  state.figure.width = +$('fig-w').value;
+  state.figure.height = +$('fig-h').value;
+  state.figure.bg = $('fig-bg').value;
+  state.figure.terminal = $('fig-term').value;
+  state.margin.top = +$('m-top').value;
+  state.margin.bottom = +$('m-bottom').value;
+  state.margin.left = +$('m-left').value;
+  state.margin.right = +$('m-right').value;
+  state.title = $('lbl-title').value;
+  state.xlabel = $('lbl-xlabel').value;
+  state.ylabel = $('lbl-ylabel').value;
+  state.labelFontSize = +$('lbl-fontsize').value;
+  if (!state.xaxis.locked) {
+    state.xaxis.auto = $('xaxis-auto').checked;
+    state.xaxis.min = +$('xaxis-min').value;
+    state.xaxis.max = +$('xaxis-max').value;
+  }
+  state.xaxis.log = $('xaxis-log').checked;
+  state.xaxis.grid = $('xaxis-grid').checked;
+  if (!state.yaxis.locked) {
+    state.yaxis.auto = $('yaxis-auto').checked;
+    state.yaxis.min = +$('yaxis-min').value;
+    state.yaxis.max = +$('yaxis-max').value;
+  }
+  state.yaxis.log = $('yaxis-log').checked;
+  state.yaxis.grid = $('yaxis-grid').checked;
+  state.key.show = $('key-show').checked;
+  state.key.pos = $('key-pos').value;
+  state.key.box = $('key-box').checked;
+  const newHoriz = $('key-horiz').checked;
+  if (newHoriz !== state.key.horizontal) state.key.width = null; // reset custom width only when toggling
+  state.key.horizontal = newHoriz;
+  state.key.fontSize = +$('key-fontsize').value;
+  state.customCommands = $('custom-commands').value;
+  // Enable/disable axis range inputs
+  $('xaxis-min').disabled = state.xaxis.auto || state.xaxis.locked;
+  $('xaxis-max').disabled = state.xaxis.auto || state.xaxis.locked;
+  $('xaxis-auto').disabled = state.xaxis.locked;
+  $('yaxis-min').disabled = state.yaxis.auto || state.yaxis.locked;
+  $('yaxis-max').disabled = state.yaxis.auto || state.yaxis.locked;
+  $('yaxis-auto').disabled = state.yaxis.locked;
+}
+
+function syncStateToProps() {
+  $('fig-w').value = state.figure.width;
+  $('fig-h').value = state.figure.height;
+  $('fig-bg').value = state.figure.bg;
+  $('fig-term').value = state.figure.terminal || 'pngcairo';
+  $('m-top').value = state.margin.top;
+  $('m-bottom').value = state.margin.bottom;
+  $('m-left').value = state.margin.left;
+  $('m-right').value = state.margin.right;
+  $('lbl-title').value = state.title;
+  $('lbl-xlabel').value = state.xlabel;
+  $('lbl-ylabel').value = state.ylabel;
+  $('lbl-fontsize').value = state.labelFontSize;
+  $('xaxis-auto').checked = state.xaxis.auto;
+  $('xaxis-min').value = state.xaxis.min;
+  $('xaxis-max').value = state.xaxis.max;
+  $('xaxis-log').checked = state.xaxis.log;
+  $('xaxis-grid').checked = state.xaxis.grid;
+  $('yaxis-auto').checked = state.yaxis.auto;
+  $('yaxis-min').value = state.yaxis.min;
+  $('yaxis-max').value = state.yaxis.max;
+  $('yaxis-log').checked = state.yaxis.log;
+  $('yaxis-grid').checked = state.yaxis.grid;
+  $('key-show').checked = state.key.show;
+  $('key-pos').value = state.key.pos;
+  $('key-box').checked = state.key.box;
+  $('key-horiz').checked = state.key.horizontal;
+  $('key-fontsize').value = state.key.fontSize;
+  $('custom-commands').value = state.customCommands;
+  $('xaxis-min').disabled = state.xaxis.auto || state.xaxis.locked;
+  $('xaxis-max').disabled = state.xaxis.auto || state.xaxis.locked;
+  $('xaxis-auto').disabled = state.xaxis.locked;
+  $('yaxis-min').disabled = state.yaxis.auto || state.yaxis.locked;
+  $('yaxis-max').disabled = state.yaxis.auto || state.yaxis.locked;
+  $('yaxis-auto').disabled = state.yaxis.locked;
+  // Sync lock button appearance
+  const xlBtn = $('xaxis-lock');
+  xlBtn.textContent = state.xaxis.locked ? '\u{1F512}' : '\u{1F513}';
+  xlBtn.className = 'lock-btn' + (state.xaxis.locked ? ' locked' : '');
+  const ylBtn = $('yaxis-lock');
+  ylBtn.textContent = state.yaxis.locked ? '\u{1F512}' : '\u{1F513}';
+  ylBtn.className = 'lock-btn' + (state.yaxis.locked ? ' locked' : '');
+}
+
+// Listen to all property inputs
+document.querySelectorAll('#right-panel input, #right-panel select, #right-panel textarea').forEach(el => {
+  el.addEventListener('input', () => { syncPropsToState(); render(); });
+  el.addEventListener('change', () => { syncPropsToState(); render(); });
+});
+
+// Axis lock buttons
+$('xaxis-lock').addEventListener('click', (e) => {
+  e.stopPropagation(); // don't trigger section collapse
+  state.xaxis.locked = !state.xaxis.locked;
+  syncStateToProps();
+  render();
+  $('status-text').textContent = state.xaxis.locked ? 'X axis range locked' : 'X axis range unlocked';
+});
+$('yaxis-lock').addEventListener('click', (e) => {
+  e.stopPropagation();
+  state.yaxis.locked = !state.yaxis.locked;
+  syncStateToProps();
+  render();
+  $('status-text').textContent = state.yaxis.locked ? 'Y axis range locked' : 'Y axis range unlocked';
+});
+
+// Data source selector
+const dsSelector = $('ds-selector');
+
+function renderDsSelector() {
+  const prev = dsSelector.value;
+  dsSelector.innerHTML = state.dataSources.length === 0
+    ? '<option value="">No data</option>'
+    : state.dataSources.map((ds, i) =>
+        `<option value="${ds.id}">${ds.name.replace(/</g,'&lt;')}</option>`
+      ).join('');
+  // Auto-select the data source of the current plot
+  if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
+    const plot = state.plots[state.selectedPlot];
+    if (plot.dataSourceId != null) dsSelector.value = plot.dataSourceId;
+  }
+  showSelectedDs();
+}
+
+function showSelectedDs() {
+  const dsId = +dsSelector.value;
+  const ds = state.dataSources.find(d => d.id === dsId);
+  dataEditor.value = ds ? ds.rawData : '';
+  dataEditor.disabled = !ds;
+}
+
+dsSelector.addEventListener('change', showSelectedDs);
+
+// Data editor -> update selected data source
+dataEditor.addEventListener('input', () => {
+  const dsId = +dsSelector.value;
+  const ds = state.dataSources.find(d => d.id === dsId);
+  if (ds) {
+    ds.rawData = dataEditor.value;
+    const parsed = parseDataSource(ds.rawData);
+    ds.headers = parsed.headers;
+    ds.rows = parsed.rows;
+    // Re-render plot props if selected plot uses this data source (columns may have changed)
+    if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
+      const plot = state.plots[state.selectedPlot];
+      if (plot.dataSourceId === dsId) renderPlotProps(plot);
+    }
+    render();
+  }
+});
+
+// ============================================================
+// PLOT LIST UI
+// ============================================================
+function renderPlotList() {
+  const list = $('plot-list');
+  list.innerHTML = '';
+  state.plots.forEach((p, i) => {
+    const item = document.createElement('div');
+    item.className = 'plot-item' + (i === state.selectedPlot ? ' selected' : '');
+    item.draggable = true;
+    item.dataset.index = i;
+    const safeName = p.name.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    item.innerHTML = `
+      <span style="cursor:grab;color:#555;font-size:10px;margin-right:2px">&#9776;</span>
+      <div class="swatch" style="background:${p.color};opacity:${p.visible ? 1 : 0.3}"></div>
+      <span class="name" style="opacity:${p.visible ? 1 : 0.4}">${safeName}</span>
+      <button class="vis-btn${p.visible ? '' : ' hidden'}" title="${p.visible ? 'Hide' : 'Show'}">${p.visible ? '\u25C9' : '\u25CE'}</button>
+      <button class="remove-btn" title="Remove">&times;</button>
+    `;
+    item.addEventListener('click', (e) => {
+      if (e.target.classList.contains('remove-btn')) {
+        state.plots.splice(i, 1);
+        if (state.selectedPlot >= state.plots.length) state.selectedPlot = state.plots.length - 1;
+        renderPlotList();
+        selectPlot(state.selectedPlot);
+        render();
+        return;
+      }
+      if (e.target.classList.contains('vis-btn')) {
+        p.visible = !p.visible;
+        renderPlotList();
+        if (i === state.selectedPlot) renderPlotProps(p);
+        render();
+        return;
+      }
+      selectPlot(i);
+    });
+    // Drag-to-reorder
+    item.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', i);
+      item.style.opacity = '0.4';
+    });
+    item.addEventListener('dragend', () => { item.style.opacity = '1'; });
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      item.style.borderTop = '2px solid #9cdcfe';
+    });
+    item.addEventListener('dragleave', () => { item.style.borderTop = ''; });
+    item.addEventListener('drop', (e) => {
+      e.preventDefault();
+      item.style.borderTop = '';
+      const fromIdx = +e.dataTransfer.getData('text/plain');
+      const toIdx = i;
+      if (fromIdx === toIdx) return;
+      const [moved] = state.plots.splice(fromIdx, 1);
+      state.plots.splice(toIdx, 0, moved);
+      // Adjust selection
+      if (state.selectedPlot === fromIdx) state.selectedPlot = toIdx;
+      else if (fromIdx < state.selectedPlot && toIdx >= state.selectedPlot) state.selectedPlot--;
+      else if (fromIdx > state.selectedPlot && toIdx <= state.selectedPlot) state.selectedPlot++;
+      renderPlotList();
+      render();
+    });
+    list.appendChild(item);
+  });
+}
+
+function selectPlot(idx) {
+  state.selectedPlot = idx;
+  renderPlotList();
+  if (idx >= 0 && idx < state.plots.length) {
+    const p = state.plots[idx];
+    // Show this plot's data source in the editor
+    if (p.dataSourceId != null) {
+      dsSelector.value = p.dataSourceId;
+    }
+    showSelectedDs();
+    renderPlotProps(p);
+  } else {
+    dataEditor.value = '';
+    dataEditor.disabled = true;
+    $('plot-props-section').style.display = 'none';
+  }
+}
+
+function renderPlotProps(plot) {
+  const section = $('plot-props-section');
+  section.style.display = '';
+  const body = $('plot-props');
+  const escapedName = plot.name.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Build data source and column selector options
+  const dsOpts = state.dataSources.map(ds =>
+    `<option value="${ds.id}" ${ds.id===plot.dataSourceId?'selected':''}>${ds.name.replace(/</g,'&lt;')}</option>`
+  ).join('');
+  const cols = getDataSourceColumns(plot);
+  const colXOpts = cols.map((h, i) =>
+    `<option value="${i}" ${i===plot.usingX?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+  ).join('');
+  const colYOpts = cols.map((h, i) =>
+    `<option value="${i}" ${i===plot.usingY?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+  ).join('');
+  const colYerrOpts = `<option value="-1" ${plot.usingYerr==null||plot.usingYerr<0?'selected':''}>None</option>` +
+    cols.map((h, i) =>
+      `<option value="${i}" ${i===plot.usingYerr?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+    ).join('');
+  const isFunc = plot.isFunction;
+  body.innerHTML = `
+    <div class="prop-row">
+      <label>Name</label>
+      <input type="text" id="pp-name" value="${escapedName}">
+    </div>
+    <div class="prop-row" ${isFunc?'style="display:none"':''}>
+      <label>Source</label>
+      <select id="pp-ds">${dsOpts}</select>
+    </div>
+    <div class="prop-row" ${isFunc?'style="display:none"':''}>
+      <label>using X</label>
+      <select id="pp-col-x">${colXOpts}</select>
+      <label style="width:auto">Y</label>
+      <select id="pp-col-y">${colYOpts}</select>
+    </div>
+    <div class="prop-row" ${isFunc?'style="display:none"':''}>
+      <label>Y Error</label>
+      <select id="pp-col-yerr">${colYerrOpts}</select>
+    </div>
+    <div class="prop-row">
+      <label>Type</label>
+      <select id="pp-type">
+        <option value="lines" ${plot.type==='lines'?'selected':''}>Lines</option>
+        <option value="points" ${plot.type==='points'?'selected':''}>Points</option>
+        <option value="linespoints" ${plot.type==='linespoints'?'selected':''}>Lines+Points</option>
+        <option value="boxes" ${plot.type==='boxes'?'selected':''}>Boxes (Bars)</option>
+        <option value="impulses" ${plot.type==='impulses'?'selected':''}>Impulses</option>
+        <option value="steps" ${plot.type==='steps'?'selected':''}>Steps</option>
+        <option value="fillcurves" ${plot.type==='fillcurves'?'selected':''}>Fill Curves</option>
+      </select>
+    </div>
+    <div class="prop-row">
+      <label>Color</label>
+      <input type="color" id="pp-color" value="${plot.color}">
+    </div>
+    <div class="prop-row">
+      <label>Line W</label>
+      <input type="number" id="pp-lw" value="${plot.lineWidth}" min="0.5" max="10" step="0.5">
+    </div>
+    <div class="prop-row">
+      <label>Point Size</label>
+      <input type="number" id="pp-ps" value="${plot.pointSize}" min="1" max="20" step="1">
+    </div>
+    <div class="prop-row">
+      <label>Point</label>
+      <select id="pp-pt">
+        <option value="circle" ${plot.pointType==='circle'?'selected':''}>Circle</option>
+        <option value="square" ${plot.pointType==='square'?'selected':''}>Square</option>
+        <option value="triangle" ${plot.pointType==='triangle'?'selected':''}>Triangle</option>
+        <option value="diamond" ${plot.pointType==='diamond'?'selected':''}>Diamond</option>
+        <option value="cross" ${plot.pointType==='cross'?'selected':''}>Cross</option>
+        <option value="plus" ${plot.pointType==='plus'?'selected':''}>Plus</option>
+      </select>
+    </div>
+    <div class="prop-row">
+      <label>Dash</label>
+      <select id="pp-dash">
+        <option value="solid" ${plot.dashType==='solid'?'selected':''}>Solid</option>
+        <option value="dashed" ${plot.dashType==='dashed'?'selected':''}>Dashed</option>
+        <option value="dotted" ${plot.dashType==='dotted'?'selected':''}>Dotted</option>
+        <option value="dashdot" ${plot.dashType==='dashdot'?'selected':''}>Dash-Dot</option>
+      </select>
+    </div>
+    <div class="prop-row">
+      <label>Fill Alpha</label>
+      <input type="number" id="pp-fa" value="${plot.fillAlpha}" min="0" max="1" step="0.05">
+    </div>
+    <div class="prop-row">
+      <label>X Offset</label>
+      <input type="number" id="pp-xoff" value="${plot.xOffset}" step="any" title="Shift all x values (data units). Use to place bar charts side by side." ${plot.offsetLocked?'disabled':''}>
+      <button class="lock-btn${plot.offsetLocked?' locked':''}" id="pp-off-lock" title="Lock offset to prevent accidental drag changes">${plot.offsetLocked?'\u{1F512}':'\u{1F513}'}</button>
+    </div>
+    <div class="prop-row">
+      <label>Bar Width</label>
+      <input type="number" id="pp-bw" value="${plot.barWidth}" step="any" min="0" title="0 = auto. Explicit width in data units for boxes." ${plot.offsetLocked?'disabled':''}>
+    </div>
+    <div class="prop-row">
+      <label>Visible</label>
+      <input type="checkbox" id="pp-vis" ${plot.visible?'checked':''}>
+    </div>
+    <div class="prop-row">
+      <label>Smooth</label>
+      <select id="pp-smooth">
+        <option value="none" ${plot.smooth==='none'?'selected':''}>None</option>
+        <option value="csplines" ${plot.smooth==='csplines'?'selected':''}>C-Splines</option>
+        <option value="bezier" ${plot.smooth==='bezier'?'selected':''}>Bezier</option>
+        <option value="acsplines" ${plot.smooth==='acsplines'?'selected':''}>A-C-Splines</option>
+      </select>
+    </div>
+    <div style="border-top:1px solid #3e3e3e;margin:8px 0;padding-top:8px">
+      <div class="prop-row">
+        <label>Function</label>
+        <input type="checkbox" id="pp-isfunc" ${plot.isFunction?'checked':''}>
+      </div>
+      <div class="prop-row">
+        <label>f(x) =</label>
+        <input type="text" id="pp-funcexpr" value="${plot.funcExpr.replace(/&/g,'&amp;').replace(/"/g,'&quot;')}" placeholder="sin(x)" ${!plot.isFunction?'disabled':''}>
+      </div>
+      <div class="prop-row">
+        <label>X range</label>
+        <input type="number" id="pp-fxmin" value="${plot.funcXmin}" step="any" style="flex:0 0 50px" ${!plot.isFunction?'disabled':''}>
+        <span style="color:#888">to</span>
+        <input type="number" id="pp-fxmax" value="${plot.funcXmax}" step="any" style="flex:0 0 50px" ${!plot.isFunction?'disabled':''}>
+      </div>
+      <div class="prop-row">
+        <label>Samples</label>
+        <input type="number" id="pp-fsamples" value="${plot.funcSamples}" min="10" max="2000" ${!plot.isFunction?'disabled':''}>
+      </div>
+    </div>
+  `;
+  // Bind plot prop changes
+  body.querySelectorAll('input, select').forEach(el => {
+    el.addEventListener('input', () => syncPlotProps(plot));
+    el.addEventListener('change', () => syncPlotProps(plot));
+  });
+  // Offset lock button
+  $('pp-off-lock').addEventListener('click', () => {
+    plot.offsetLocked = !plot.offsetLocked;
+    renderPlotProps(plot);
+    render();
+    $('status-text').textContent = plot.offsetLocked
+      ? `Offset locked for "${plot.name}"`
+      : `Offset unlocked for "${plot.name}"`;
+  });
+}
+
+function syncPlotProps(plot) {
+  plot.name = $('pp-name').value;
+  // Data source & column selection
+  const prevDs = plot.dataSourceId;
+  if (!plot.isFunction) {
+    const dsVal = $('pp-ds').value;
+    plot.dataSourceId = dsVal !== '' ? +dsVal : null;
+    plot.usingX = +$('pp-col-x').value;
+    plot.usingY = +$('pp-col-y').value;
+    const yerrVal = +$('pp-col-yerr').value;
+    plot.usingYerr = yerrVal >= 0 ? yerrVal : null;
+    plot.hasErrorBars = plot.usingYerr != null && plot.usingYerr >= 0;
+  }
+  plot.type = $('pp-type').value;
+  plot.color = $('pp-color').value;
+  plot.lineWidth = +$('pp-lw').value;
+  plot.pointSize = +$('pp-ps').value;
+  plot.pointType = $('pp-pt').value;
+  plot.dashType = $('pp-dash').value;
+  plot.fillAlpha = +$('pp-fa').value;
+  plot.xOffset = +$('pp-xoff').value || 0;
+  plot.barWidth = +$('pp-bw').value || 0;
+  plot.visible = $('pp-vis').checked;
+  plot.smooth = $('pp-smooth').value;
+  plot.isFunction = $('pp-isfunc').checked;
+  plot.funcExpr = $('pp-funcexpr').value;
+  plot.funcXmin = +$('pp-fxmin').value;
+  plot.funcXmax = +$('pp-fxmax').value;
+  plot.funcSamples = +$('pp-fsamples').value;
+  $('pp-funcexpr').disabled = !plot.isFunction;
+  $('pp-fxmin').disabled = !plot.isFunction;
+  $('pp-fxmax').disabled = !plot.isFunction;
+  $('pp-fsamples').disabled = !plot.isFunction;
+  // Re-render props if data source changed (updates column selectors)
+  if (plot.dataSourceId !== prevDs) {
+    renderPlotProps(plot);
+    dsSelector.value = plot.dataSourceId;
+    showSelectedDs();
+  }
+  renderPlotList();
+  render();
+}
+
+// ============================================================
+// ADD PLOT
+// ============================================================
+function addPlot() {
+  const ds = createDataSource(null, '# x y\n1 2\n2 4\n3 3\n4 7\n5 5');
+  state.dataSources.push(ds);
+  const plot = createPlot();
+  plot.dataSourceId = ds.id;
+  plot.usingX = 0;
+  plot.usingY = 1;
+  state.plots.push(plot);
+  renderDsSelector();
+  selectPlot(state.plots.length - 1);
+  render();
+  renderPlotList();
+  $('status-text').textContent = `Added plot: ${plot.name}`;
+}
+
+function addFunctionPlot() {
+  const plot = createPlot();
+  plot.name = `f${state.plots.length + 1}(x)`;
+  plot.isFunction = true;
+  plot.funcExpr = 'sin(x)';
+  plot.funcXmin = -10;
+  plot.funcXmax = 10;
+  plot.funcSamples = 200;
+  plot.type = 'lines';
+  state.plots.push(plot);
+  selectPlot(state.plots.length - 1);
+  render();
+  renderPlotList();
+  $('status-text').textContent = `Added function plot: ${plot.name}`;
+}
+
+// ============================================================
+// CANVAS MOUSE INTERACTIONS
+// ============================================================
+let dragMode = null; // 'legend', 'margin-top/bottom/left/right', 'plot-offset'
+let dragStart = { x: 0, y: 0 };
+let dragOriginal = {};
+let dragPlot = null; // the plot being offset-dragged
+
+function nearDataPoint(mx, my, area) {
+  const bounds = state._bounds;
+  if (!bounds) return false;
+  for (const plot of state.plots) {
+    if (!plot.visible || plot.offsetLocked) continue;
+    const xOff = plot.xOffset || 0;
+    for (const d of getPlotData(plot)) {
+      const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
+      if (Math.hypot(cp.x - mx, cp.y - my) < 20) return true;
+    }
+  }
+  return false;
+}
+
+canvas.addEventListener('mousedown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  // Check legend resize (right edge) or move (interior)
+  if (state.key.show && state._keyRect) {
+    const kr = state._keyRect;
+    const resizeEdge = 6;
+    // Right edge → resize width
+    if (mx >= kr.x + kr.w - resizeEdge && mx <= kr.x + kr.w + resizeEdge &&
+        my >= kr.y && my <= kr.y + kr.h) {
+      dragMode = 'legend-resize';
+      dragStart = { x: mx, y: my };
+      dragOriginal = { w: kr.w };
+      return;
+    }
+    // Interior → move
+    if (mx >= kr.x && mx <= kr.x + kr.w && my >= kr.y && my <= kr.y + kr.h) {
+      dragMode = 'legend';
+      dragStart = { x: mx, y: my };
+      dragOriginal = { x: kr.x, y: kr.y };
+      return;
+    }
+  }
+
+  // Check margin drag zones (within 8px of each edge)
+  const area = state._area;
+  if (area) {
+    const edge = 10;
+    if (my >= area.y - edge && my <= area.y + edge && mx >= area.x && mx <= area.x + area.w) {
+      dragMode = 'margin-top'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.top }; return;
+    }
+    if (my >= area.y + area.h - edge && my <= area.y + area.h + edge && mx >= area.x && mx <= area.x + area.w) {
+      dragMode = 'margin-bottom'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.bottom }; return;
+    }
+    if (mx >= area.x - edge && mx <= area.x + edge && my >= area.y && my <= area.y + area.h) {
+      dragMode = 'margin-left'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.left }; return;
+    }
+    if (mx >= area.x + area.w - edge && mx <= area.x + area.w + edge && my >= area.y && my <= area.y + area.h) {
+      dragMode = 'margin-right'; dragStart = { x: mx, y: my }; dragOriginal = { v: state.margin.right }; return;
+    }
+
+    // Shift+drag inside plot area → pan
+    if (e.shiftKey && mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) {
+      const bounds = state._bounds;
+      if (bounds) {
+        dragMode = 'pan';
+        dragStart = { x: mx, y: my };
+        dragOriginal = { xmin: bounds.xmin, xmax: bounds.xmax, ymin: bounds.ymin, ymax: bounds.ymax };
+        return;
+      }
+    }
+
+    // Check plot-offset drag: click near a data point inside plot area
+    if (mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) {
+      const bounds = state._bounds;
+      if (bounds) {
+        let bestDist = 20; // max pixel distance to grab
+        let bestPlot = null;
+        for (const plot of state.plots) {
+          if (!plot.visible) continue;
+          const xOff = plot.xOffset || 0;
+          for (const d of getPlotData(plot)) {
+            const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
+            const dist = Math.hypot(cp.x - mx, cp.y - my);
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestPlot = plot;
+            }
+          }
+        }
+        if (bestPlot) {
+          // Select this plot in the sidebar
+          const idx = state.plots.indexOf(bestPlot);
+          if (idx !== state.selectedPlot) selectPlot(idx);
+          // Only start drag if offset is not locked
+          if (!bestPlot.offsetLocked) {
+            dragMode = 'plot-offset';
+            dragPlot = bestPlot;
+            dragStart = { x: mx, y: my };
+            dragOriginal = { xOffset: bestPlot.xOffset || 0 };
+          }
+          return;
+        }
+      }
+    }
+  }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  // Update cursor position display
+  if (state._area && state._bounds) {
+    const a = state._area;
+    if (mx >= a.x && mx <= a.x + a.w && my >= a.y && my <= a.y + a.h) {
+      const d = canvasToData(mx, my, a, state._bounds);
+      $('cursor-pos').textContent = `x: ${d.x.toPrecision(4)}  y: ${d.y.toPrecision(4)}`;
+    } else {
+      $('cursor-pos').textContent = '';
+    }
+  }
+
+  // Change cursor near edges
+  if (!dragMode && state._area) {
+    const area = state._area;
+    const edge = 10;
+    if ((my >= area.y - edge && my <= area.y + edge && mx >= area.x && mx <= area.x + area.w) ||
+        (my >= area.y + area.h - edge && my <= area.y + area.h + edge && mx >= area.x && mx <= area.x + area.w)) {
+      canvas.style.cursor = 'ns-resize';
+    } else if ((mx >= area.x - edge && mx <= area.x + edge && my >= area.y && my <= area.y + area.h) ||
+               (mx >= area.x + area.w - edge && mx <= area.x + area.w + edge && my >= area.y && my <= area.y + area.h)) {
+      canvas.style.cursor = 'ew-resize';
+    } else if (state.key.show && state._keyRect) {
+      const kr = state._keyRect;
+      const resizeEdge = 6;
+      if (mx >= kr.x + kr.w - resizeEdge && mx <= kr.x + kr.w + resizeEdge &&
+          my >= kr.y && my <= kr.y + kr.h) {
+        canvas.style.cursor = 'ew-resize';
+      } else if (mx >= kr.x && mx <= kr.x + kr.w && my >= kr.y && my <= kr.y + kr.h) {
+        canvas.style.cursor = 'move';
+      } else {
+        canvas.style.cursor = nearDataPoint(mx, my, area) ? 'grab' : 'crosshair';
+      }
+    } else {
+      canvas.style.cursor = nearDataPoint(mx, my, area) ? 'grab' : 'crosshair';
+    }
+  }
+
+  if (!dragMode) return;
+
+  if (dragMode === 'pan') {
+    canvas.style.cursor = 'all-scroll';
+    const area = state._area;
+    if (area) {
+      // Convert pixel delta to data-unit delta using original bounds
+      const pxPerDataX = area.w / (dragOriginal.xmax - dragOriginal.xmin);
+      const pxPerDataY = area.h / (dragOriginal.ymax - dragOriginal.ymin);
+      const dx = (mx - dragStart.x) / pxPerDataX;
+      const dy = (my - dragStart.y) / pxPerDataY;
+      if (!state.xaxis.locked) {
+        state.xaxis.auto = false;
+        state.xaxis.min = Math.round(dragOriginal.xmin - dx);
+        state.xaxis.max = Math.round(dragOriginal.xmax - dx);
+      }
+      if (!state.yaxis.locked) {
+        state.yaxis.auto = false;
+        state.yaxis.min = Math.round(dragOriginal.ymin + dy);
+        state.yaxis.max = Math.round(dragOriginal.ymax + dy);
+      }
+      syncStateToProps();
+    }
+    render();
+    return;
+  }
+
+  if (dragMode === 'plot-offset' && dragPlot) {
+    canvas.style.cursor = 'grabbing';
+    const area = state._area;
+    const bounds = state._bounds;
+    if (area && bounds) {
+      // Convert pixel delta to data-unit delta
+      const dStart = canvasToData(dragStart.x, dragStart.y, area, bounds);
+      const dNow = canvasToData(mx, my, area, bounds);
+      const deltaX = dNow.x - dStart.x;
+      dragPlot.xOffset = Math.round((dragOriginal.xOffset + deltaX) * 100) / 100;
+      // Sync sidebar input if this plot is selected
+      const xOffEl = document.getElementById('pp-xoff');
+      if (xOffEl) xOffEl.value = dragPlot.xOffset;
+    }
+    render();
+    return;
+  }
+
+  if (dragMode === 'legend-resize') {
+    canvas.style.cursor = 'ew-resize';
+    const newW = Math.max(40, dragOriginal.w + (mx - dragStart.x));
+    state.key.width = Math.round(newW);
+    // Sync the horizontal checkbox in sidebar
+    const horizEl = document.getElementById('key-horiz');
+    if (horizEl) horizEl.checked = state.key.horizontal;
+    render();
+    return;
+  }
+
+  if (dragMode === 'legend') {
+    state.key.x = dragOriginal.x + (mx - dragStart.x);
+    state.key.y = dragOriginal.y + (my - dragStart.y);
+    render();
+    return;
+  }
+
+  const dy = my - dragStart.y;
+  const dx = mx - dragStart.x;
+  if (dragMode === 'margin-top') {
+    state.margin.top = Math.max(10, dragOriginal.v + dy);
+    $('m-top').value = Math.round(state.margin.top);
+  } else if (dragMode === 'margin-bottom') {
+    state.margin.bottom = Math.max(10, dragOriginal.v - dy);
+    $('m-bottom').value = Math.round(state.margin.bottom);
+  } else if (dragMode === 'margin-left') {
+    state.margin.left = Math.max(10, dragOriginal.v + dx);
+    $('m-left').value = Math.round(state.margin.left);
+  } else if (dragMode === 'margin-right') {
+    state.margin.right = Math.max(10, dragOriginal.v - dx);
+    $('m-right').value = Math.round(state.margin.right);
+  }
+  render();
+});
+
+canvas.addEventListener('mouseup', () => { dragMode = null; dragPlot = null; });
+canvas.addEventListener('mouseleave', () => { dragMode = null; dragPlot = null; });
+
+// Double-click to add annotation
+canvas.addEventListener('dblclick', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const area = state._area;
+  const bounds = state._bounds;
+  if (!area || !bounds) return;
+  if (mx < area.x || mx > area.x + area.w || my < area.y || my > area.y + area.h) return;
+  const d = canvasToData(mx, my, area, bounds);
+  const text = prompt('Annotation text:');
+  if (text) {
+    state.annotations.push({ text, x: d.x, y: d.y, fontSize: 12, color: '#333333' });
+    render();
+    renderAnnotationList();
+    $('status-text').textContent = 'Annotation added (double-click to add more)';
+  }
+});
+
+function renderAnnotationList() {
+  const container = $('annotations-list');
+  if (state.annotations.length === 0) {
+    container.innerHTML = '<div style="color:#666;font-size:11px">Double-click on the plot to add text labels</div>';
+    return;
+  }
+  container.innerHTML = state.annotations.map((ann, i) =>
+    `<div class="prop-row" style="font-size:11px">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ccc">"${ann.text.replace(/"/g, '&quot;').replace(/</g, '&lt;')}"</span>
+      <button class="remove-btn" onclick="removeAnnotation(${i})" title="Remove">&times;</button>
+    </div>`
+  ).join('');
+}
+
+function removeAnnotation(idx) {
+  state.annotations.splice(idx, 1);
+  renderAnnotationList();
+  render();
+}
+
+// ============================================================
+// GNUPLOT EXPORT
+// ============================================================
+function generateGnuplotScript() {
+  const lines = [];
+  lines.push('# Generated by Gnuplot Studio');
+
+  // Terminal
+  const term = state.figure.terminal || 'pngcairo';
+  const extMap = { pngcairo: 'png', svg: 'svg', pdfcairo: 'pdf', epscairo: 'eps', tikz: 'tex', qt: '' };
+  const ext = extMap[term] || 'png';
+  if (term === 'qt') {
+    lines.push(`set terminal qt size ${state.figure.width},${state.figure.height} enhanced font "sans,${state.labelFontSize}"`);
+  } else {
+    lines.push(`set terminal ${term} size ${state.figure.width},${state.figure.height} enhanced font "sans,${state.labelFontSize}"`);
+    if (ext) lines.push(`set output "plot.${ext}"`);
+  }
+  lines.push('');
+
+  if (state.title) lines.push(`set title "${state.title}"`);
+  if (state.xlabel) lines.push(`set xlabel "${state.xlabel}"`);
+  if (state.ylabel) lines.push(`set ylabel "${state.ylabel}"`);
+
+  // Background color (if not white)
+  if (state.figure.bg && state.figure.bg !== '#ffffff') {
+    lines.push(`set object 1 rectangle from screen 0,0 to screen 1,1 behind fillcolor rgb "${state.figure.bg}" fillstyle solid noborder`);
+  }
+
+  // Margins (gnuplot screen coordinates 0-1)
+  const ml = state.margin.left / state.figure.width;
+  const mr = 1 - state.margin.right / state.figure.width;
+  const mt = 1 - state.margin.top / state.figure.height;
+  const mb = state.margin.bottom / state.figure.height;
+  lines.push(`set lmargin at screen ${ml.toFixed(4)}`);
+  lines.push(`set rmargin at screen ${mr.toFixed(4)}`);
+  lines.push(`set tmargin at screen ${mt.toFixed(4)}`);
+  lines.push(`set bmargin at screen ${mb.toFixed(4)}`);
+
+  if (!state.xaxis.auto) lines.push(`set xrange [${state.xaxis.min}:${state.xaxis.max}]`);
+  if (!state.yaxis.auto) lines.push(`set yrange [${state.yaxis.min}:${state.yaxis.max}]`);
+  if (state.xaxis.log) lines.push('set logscale x');
+  if (state.yaxis.log) lines.push('set logscale y');
+
+  // Grid — per-axis control
+  if (state.xaxis.grid && state.yaxis.grid) {
+    lines.push('set grid xtics ytics');
+  } else if (state.xaxis.grid) {
+    lines.push('set grid xtics noytics');
+  } else if (state.yaxis.grid) {
+    lines.push('set grid noxtics ytics');
+  }
+
+  // Key/legend
+  if (!state.key.show) {
+    lines.push('set key off');
+  } else {
+    const posMap = {
+      'top-right': 'top right', 'top-left': 'top left',
+      'bottom-right': 'bottom right', 'bottom-left': 'bottom left',
+      'outside-right': 'outside right top',
+    };
+    let keyLine = `set key ${posMap[state.key.pos] || 'top right'}`;
+    if (state.key.horizontal) keyLine += ' horizontal';
+    if (state.key.box) keyLine += ' box';
+    keyLine += ` font ",${state.key.fontSize}"`;
+    lines.push(keyLine);
+  }
+
+  // Annotations
+  state.annotations.forEach((ann, i) => {
+    lines.push(`set label ${i + 1} "${ann.text}" at ${ann.x},${ann.y} font ",${ann.fontSize}" tc rgb "${ann.color}"`);
+  });
+
+  // Custom commands
+  const customCmd = state.customCommands || '';
+  if (customCmd.trim()) {
+    lines.push('');
+    lines.push('# Custom commands');
+    lines.push(customCmd.trim());
+  }
+
+  lines.push('');
+
+  // Data + plot commands
+  const visPlots = state.plots.filter(p => p.visible && getPlotData(p).length > 0);
+  if (visPlots.length > 0) {
+    const typeMap = {
+      'lines': 'lines', 'points': 'points', 'linespoints': 'linespoints',
+      'boxes': 'boxes', 'impulses': 'impulses', 'steps': 'steps',
+      'fillcurves': 'filledcurves y=0',
+    };
+    const dashMap = { 'solid': 1, 'dashed': 2, 'dotted': 3, 'dashdot': 4 };
+    const ptMap = { 'circle': 7, 'square': 5, 'triangle': 9, 'diamond': 13, 'cross': 2, 'plus': 1 };
+
+    const plotParts = [];
+
+    // Fill style for fillcurves
+    const hasFill = visPlots.some(p => p.type === 'fillcurves' || p.type === 'boxes');
+    if (hasFill) {
+      const avgAlpha = visPlots.filter(p => p.type === 'fillcurves' || p.type === 'boxes')
+        .reduce((s, p) => s + p.fillAlpha, 0) / visPlots.filter(p => p.type === 'fillcurves' || p.type === 'boxes').length;
+      lines.push(`set style fill transparent solid ${avgAlpha.toFixed(2)}`);
+    }
+
+    // Per-plot boxwidth: if any plot uses explicit barWidth, emit set boxwidth
+    const firstBW = visPlots.find(p => p.type === 'boxes' && p.barWidth > 0);
+    if (firstBW) {
+      lines.push(`set boxwidth ${firstBW.barWidth} absolute`);
+    }
+
+    // Emit shared data source blocks (one per unique data source used)
+    const dsBlockNames = new Map(); // dsId -> block name
+    let dsIdx = 0;
+    for (const p of visPlots) {
+      if (p.isFunction || p.dataSourceId == null) continue;
+      if (dsBlockNames.has(p.dataSourceId)) continue;
+      const ds = state.dataSources.find(d => d.id === p.dataSourceId);
+      if (!ds || ds.rows.length === 0) continue;
+      const blockName = `$data${dsIdx++}`;
+      dsBlockNames.set(p.dataSourceId, blockName);
+      lines.push(`${blockName} << EOD`);
+      // Write header as comment
+      if (ds.headers.length > 0) lines.push(`# ${ds.headers.join('\t')}`);
+      for (const row of ds.rows) {
+        lines.push(row.join('\t'));
+      }
+      lines.push('EOD');
+      lines.push('');
+    }
+
+    visPlots.forEach((p) => {
+      if (p.isFunction && p.funcExpr) {
+        // Function plot — gnuplot can plot functions directly with domain
+        let s = `[${p.funcXmin}:${p.funcXmax}] ${p.funcExpr}`;
+        s += ` with ${typeMap[p.type] || 'lines'}`;
+        s += ` lc rgb "${p.color}" lw ${p.lineWidth}`;
+        if (p.dashType !== 'solid') s += ` dt ${dashMap[p.dashType]}`;
+        s += ` title "${p.name}"`;
+        plotParts.push(s);
+      } else {
+        // Data plot — reference shared data block with using clause
+        const blockName = dsBlockNames.get(p.dataSourceId);
+        if (!blockName) return;
+        const xOff = p.xOffset || 0;
+        const colX = p.usingX + 1; // gnuplot uses 1-indexed columns
+        const colY = p.usingY + 1;
+        const col1 = xOff !== 0 ? `($${colX}+${xOff})` : `${colX}`;
+        let s = blockName;
+        if (p.hasErrorBars && p.usingYerr != null && p.usingYerr >= 0) {
+          const colYerr = p.usingYerr + 1;
+          s += ` using ${col1}:${colY}:${colYerr} with ${p.type === 'points' || p.type === 'linespoints' ? 'yerrorbars' : 'yerrorlines'}`;
+        } else {
+          s += ` using ${col1}:${colY} with ${typeMap[p.type] || 'lines'}`;
+        }
+        s += ` lc rgb "${p.color}" lw ${p.lineWidth}`;
+        if (p.type === 'points' || p.type === 'linespoints') {
+          s += ` pt ${ptMap[p.pointType] || 7} ps ${(p.pointSize / 4).toFixed(1)}`;
+        }
+        if (p.dashType !== 'solid') s += ` dt ${dashMap[p.dashType]}`;
+        if (p.smooth && p.smooth !== 'none') s += ` smooth ${p.smooth}`;
+        s += ` title "${p.name}"`;
+        plotParts.push(s);
+      }
+    });
+
+    if (visPlots.some(p => p.isFunction)) {
+      lines.push(`set samples 500`);
+    }
+    lines.push('plot \\');
+    plotParts.forEach((part, i) => {
+      lines.push('  ' + part + (i < plotParts.length - 1 ? ', \\' : ''));
+    });
+  }
+
+  return lines.join('\n');
+}
+
+function showExportModal() {
+  $('export-text').value = generateGnuplotScript();
+  $('export-modal').style.display = 'flex';
+}
+
+function copyExport() {
+  navigator.clipboard.writeText($('export-text').value);
+  $('status-text').textContent = 'Copied to clipboard!';
+}
+
+function downloadExport() {
+  const blob = new Blob([$('export-text').value], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'plot.gp';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ============================================================
+// IMPORT
+// ============================================================
+function showImportModal() {
+  $('import-text').value = '';
+  $('import-modal').style.display = 'flex';
+}
+
+function importData() {
+  const text = $('import-text').value.trim();
+  if (!text) return;
+
+  // Create a single shared data source from imported text
+  const ds = createDataSource('Imported', text);
+  state.dataSources.push(ds);
+
+  // Create one plot per Y column, all referencing the same data source
+  const numCols = ds.headers.length;
+  for (let col = 1; col < numCols; col++) {
+    const plot = createPlot(ds.headers[col] || `col${col + 1}`);
+    plot.dataSourceId = ds.id;
+    plot.usingX = 0;
+    plot.usingY = col;
+    state.plots.push(plot);
+  }
+
+  renderDsSelector();
+  selectPlot(state.plots.length - 1);
+  renderPlotList();
+  render();
+  closeModal('import-modal');
+  $('status-text').textContent = `Imported ${numCols - 1} plot(s) from data source "${ds.name}"`;
+}
+
+function loadFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => { $('import-text').value = reader.result; };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+function closeModal(id) { $(id).style.display = 'none'; }
+
+// Close modals on overlay click
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', (e) => { if (e.target === el) el.style.display = 'none'; });
+});
+
+function resetZoom() {
+  state.key.x = null;
+  state.key.y = null;
+  state.key.width = null;
+  state.xaxis.auto = true;
+  state.yaxis.auto = true;
+  syncStateToProps();
+  render();
+  $('status-text').textContent = 'View reset to fit data';
+}
+
+// ============================================================
+// UNDO / REDO
+// ============================================================
+const undoStack = [];
+const redoStack = [];
+let undoTimer = null;
+let undoSuspended = false;
+
+function getStateSnapshot() {
+  return JSON.stringify({
+    figure: state.figure, margin: state.margin,
+    title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
+    labelFontSize: state.labelFontSize,
+    xaxis: {...state.xaxis}, yaxis: {...state.yaxis},
+    key: {...state.key},
+    annotations: state.annotations.map(a => ({...a})),
+    customCommands: state.customCommands,
+    dataSources: state.dataSources.map(ds => ({id: ds.id, name: ds.name, rawData: ds.rawData})),
+    plots: state.plots.map(p => ({...p})),
+    selectedPlot: state.selectedPlot,
+  });
+}
+
+function pushUndo() {
+  if (undoSuspended) return;
+  clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => {
+    const snap = getStateSnapshot();
+    if (undoStack.length === 0 || undoStack[undoStack.length - 1] !== snap) {
+      undoStack.push(snap);
+      if (undoStack.length > 50) undoStack.shift();
+      redoStack.length = 0;
+    }
+  }, 300);
+}
+
+function restoreSnapshot(json) {
+  undoSuspended = true;
+  const s = JSON.parse(json);
+  Object.assign(state.figure, s.figure);
+  Object.assign(state.margin, s.margin);
+  state.title = s.title; state.xlabel = s.xlabel; state.ylabel = s.ylabel;
+  state.labelFontSize = s.labelFontSize;
+  Object.assign(state.xaxis, s.xaxis);
+  Object.assign(state.yaxis, s.yaxis);
+  Object.assign(state.key, s.key);
+  if (s.annotations) state.annotations = s.annotations;
+  if (s.customCommands !== undefined) {
+    state.customCommands = s.customCommands;
+    const cmdEl = $('custom-commands');
+    if (cmdEl) cmdEl.value = s.customCommands;
+  }
+  if (s.dataSources) {
+    state.dataSources = s.dataSources.map(ds => {
+      const created = createDataSource(ds.name, ds.rawData);
+      created.id = ds.id;
+      return created;
+    });
+    dsIdCounter = Math.max(dsIdCounter, ...state.dataSources.map(ds => ds.id + 1));
+  }
+  state.plots = s.plots;
+  state.selectedPlot = s.selectedPlot;
+  syncStateToProps();
+  renderPlotList();
+  renderDsSelector();
+  renderAnnotationList();
+  selectPlot(state.selectedPlot);
+  render();
+  undoSuspended = false;
+}
+
+function undo() {
+  if (undoStack.length < 2) { $('status-text').textContent = 'Nothing to undo'; return; }
+  redoStack.push(undoStack.pop());
+  restoreSnapshot(undoStack[undoStack.length - 1]);
+  $('status-text').textContent = 'Undo';
+}
+
+function redo() {
+  if (redoStack.length === 0) { $('status-text').textContent = 'Nothing to redo'; return; }
+  const snap = redoStack.pop();
+  undoStack.push(snap);
+  restoreSnapshot(snap);
+  $('status-text').textContent = 'Redo';
+}
+
+// Hook undo into all changes
+const origRender = render;
+render = function() {
+  origRender();
+  pushUndo();
+};
+
+// ============================================================
+// DUPLICATE PLOT
+// ============================================================
+function duplicatePlot() {
+  if (state.selectedPlot < 0 || state.selectedPlot >= state.plots.length) {
+    $('status-text').textContent = 'Select a plot to duplicate';
+    return;
+  }
+  const src = state.plots[state.selectedPlot];
+  const dup = {...src, id: plotIdCounter++, name: src.name + ' (copy)',
+    color: COLORS[(state.plots.length) % COLORS.length],
+  };
+  state.plots.push(dup);
+  selectPlot(state.plots.length - 1);
+  renderPlotList();
+  render();
+  $('status-text').textContent = `Duplicated: ${src.name}`;
+}
+
+// ============================================================
+// PNG EXPORT
+// ============================================================
+function exportPNG() {
+  // Canvas is already rendered at HiDPI resolution — toDataURL captures full resolution
+  const link = document.createElement('a');
+  link.download = 'gnuplot-studio.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+  $('status-text').textContent = 'PNG exported (high resolution)';
+}
+
+// ============================================================
+// SAVE / LOAD PROJECT
+// ============================================================
+function saveProject() {
+  const data = {
+    figure: state.figure, margin: state.margin,
+    title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
+    labelFontSize: state.labelFontSize,
+    xaxis: state.xaxis, yaxis: state.yaxis, key: state.key,
+    annotations: state.annotations,
+    customCommands: state.customCommands,
+    dataSources: state.dataSources.map(ds => ({
+      id: ds.id, name: ds.name, rawData: ds.rawData,
+    })),
+    plots: state.plots.map(p => ({
+      id: p.id, name: p.name, type: p.type, color: p.color,
+      lineWidth: p.lineWidth, pointSize: p.pointSize, pointType: p.pointType,
+      dashType: p.dashType, fillAlpha: p.fillAlpha, visible: p.visible, smooth: p.smooth,
+      dataSourceId: p.dataSourceId, usingX: p.usingX, usingY: p.usingY, usingYerr: p.usingYerr,
+      isFunction: p.isFunction, funcExpr: p.funcExpr, funcXmin: p.funcXmin,
+      funcXmax: p.funcXmax, funcSamples: p.funcSamples, hasErrorBars: p.hasErrorBars,
+      xOffset: p.xOffset, barWidth: p.barWidth, offsetLocked: p.offsetLocked,
+    })),
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'gnuplot-studio-project.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  // Also save to localStorage
+  try { localStorage.setItem('gnuplot-studio-autosave', JSON.stringify(data)); } catch(e) {}
+  $('status-text').textContent = 'Project saved';
+}
+
+function loadProject() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        applyProjectData(data);
+        $('status-text').textContent = 'Project loaded';
+      } catch(err) {
+        $('status-text').textContent = 'Error loading project: ' + err.message;
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+function applyProjectData(data) {
+  if (data.figure) Object.assign(state.figure, data.figure);
+  if (data.margin) Object.assign(state.margin, data.margin);
+  if (data.title !== undefined) state.title = data.title;
+  if (data.xlabel !== undefined) state.xlabel = data.xlabel;
+  if (data.ylabel !== undefined) state.ylabel = data.ylabel;
+  if (data.labelFontSize) state.labelFontSize = data.labelFontSize;
+  if (data.xaxis) Object.assign(state.xaxis, data.xaxis);
+  if (data.yaxis) Object.assign(state.yaxis, data.yaxis);
+  if (data.key) Object.assign(state.key, data.key);
+  if (data.annotations) state.annotations = data.annotations;
+  if (data.customCommands !== undefined) {
+    state.customCommands = data.customCommands;
+    const cmdEl = $('custom-commands');
+    if (cmdEl) cmdEl.value = data.customCommands;
+  }
+
+  if (data.dataSources) {
+    state.dataSources = data.dataSources.map(ds => {
+      const created = createDataSource(ds.name, ds.rawData);
+      created.id = ds.id;
+      return created;
+    });
+    dsIdCounter = Math.max(dsIdCounter, ...state.dataSources.map(ds => ds.id + 1));
+  }
+
+  if (data.plots) {
+    state.plots = data.plots.map(p => {
+      const plot = createPlot(p.name);
+      Object.assign(plot, p);
+      return plot;
+    });
+    plotIdCounter = Math.max(plotIdCounter, ...state.plots.map(p => p.id + 1));
+  }
+
+  state.selectedPlot = state.plots.length > 0 ? 0 : -1;
+  syncStateToProps();
+  renderPlotList();
+  renderDsSelector();
+  renderAnnotationList();
+  selectPlot(state.selectedPlot);
+  render();
+}
+
+// Auto-restore from localStorage
+function tryAutoRestore() {
+  try {
+    const saved = localStorage.getItem('gnuplot-studio-autosave');
+    if (saved) {
+      const data = JSON.parse(saved);
+      if (data.dataSources && data.plots && data.plots.length > 0) {
+        applyProjectData(data);
+        $('status-text').textContent = 'Restored previous session';
+        return true;
+      }
+    }
+  } catch(e) {}
+  return false;
+}
+
+// Auto-save on changes
+let autoSaveTimer = null;
+function scheduleAutoSave() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => {
+    try {
+      const data = {
+        figure: state.figure, margin: state.margin,
+        title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
+        labelFontSize: state.labelFontSize,
+        xaxis: state.xaxis, yaxis: state.yaxis, key: state.key,
+        annotations: state.annotations,
+        customCommands: state.customCommands,
+        dataSources: state.dataSources.map(ds => ({
+          id: ds.id, name: ds.name, rawData: ds.rawData,
+        })),
+        plots: state.plots.map(p => ({
+          id: p.id, name: p.name, type: p.type, color: p.color,
+          lineWidth: p.lineWidth, pointSize: p.pointSize, pointType: p.pointType,
+          dashType: p.dashType, fillAlpha: p.fillAlpha, visible: p.visible, smooth: p.smooth,
+          dataSourceId: p.dataSourceId, usingX: p.usingX, usingY: p.usingY, usingYerr: p.usingYerr,
+          isFunction: p.isFunction, funcExpr: p.funcExpr,
+          funcXmin: p.funcXmin, funcXmax: p.funcXmax, funcSamples: p.funcSamples,
+          hasErrorBars: p.hasErrorBars, xOffset: p.xOffset, barWidth: p.barWidth, offsetLocked: p.offsetLocked,
+        })),
+      };
+      localStorage.setItem('gnuplot-studio-autosave', JSON.stringify(data));
+    } catch(e) {}
+  }, 1000);
+}
+// Hook auto-save into render
+const prevRender = render;
+render = function() {
+  prevRender();
+  scheduleAutoSave();
+};
+
+// ============================================================
+// ZOOM VIA SCROLL WHEEL
+// ============================================================
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (!state._area || !state._bounds) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const area = state._area;
+
+  // Only zoom when cursor is inside plot area
+  if (mx < area.x || mx > area.x + area.w || my < area.y || my > area.y + area.h) return;
+
+  const bounds = state._bounds;
+  const factor = e.deltaY > 0 ? 1.15 : 1/1.15;
+  const dPos = canvasToData(mx, my, area, bounds);
+
+  // Zoom around cursor position — round to integers for cleaner range values
+  // Respect axis locks
+  if (state.xaxis.locked && state.yaxis.locked) return;
+
+  const newXmin = Math.round(dPos.x - (dPos.x - bounds.xmin) * factor);
+  const newXmax = Math.round(dPos.x + (bounds.xmax - dPos.x) * factor);
+  const newYmin = Math.round(dPos.y - (dPos.y - bounds.ymin) * factor);
+  const newYmax = Math.round(dPos.y + (bounds.ymax - dPos.y) * factor);
+
+  if (!state.xaxis.locked) {
+    state.xaxis.auto = false;
+    state.xaxis.min = newXmin;
+    state.xaxis.max = newXmax;
+  }
+  if (!state.yaxis.locked) {
+    state.yaxis.auto = false;
+    state.yaxis.min = newYmin;
+    state.yaxis.max = newYmax;
+  }
+  syncStateToProps();
+  render();
+}, { passive: false });
+
+// ============================================================
+// TOOLTIP ON HOVER (nearest point)
+// ============================================================
+const tooltip = $('tooltip');
+
+canvas.addEventListener('mousemove', function tooltipHandler(e) {
+  if (dragMode) { tooltip.style.display = 'none'; return; }
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const area = state._area;
+  const bounds = state._bounds;
+  if (!area || !bounds) return;
+  if (mx < area.x || mx > area.x + area.w || my < area.y || my > area.y + area.h) {
+    tooltip.style.display = 'none';
+    return;
+  }
+
+  // Find nearest data point across all visible plots
+  let bestDist = 20; // max pixel distance
+  let bestPlot = null, bestPt = null;
+  for (const plot of state.plots) {
+    if (!plot.visible) continue;
+    const xOff = plot.xOffset || 0;
+    for (const d of getPlotData(plot)) {
+      const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
+      const dist = Math.hypot(cp.x - mx, cp.y - my);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestPlot = plot;
+        bestPt = d;
+      }
+    }
+  }
+
+  if (bestPt) {
+    const canvasArea = $('canvas-area');
+    const caRect = canvasArea.getBoundingClientRect();
+    tooltip.style.display = 'block';
+    tooltip.innerHTML = `<span style="color:${bestPlot.color}">${bestPlot.name}</span><br>x: ${bestPt.x}  y: ${bestPt.y}`;
+    tooltip.style.left = (e.clientX - caRect.left + 12) + 'px';
+    tooltip.style.top = (e.clientY - caRect.top - 10) + 'px';
+  } else {
+    tooltip.style.display = 'none';
+  }
+});
+
+canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+// ============================================================
+// SECTION COLLAPSE
+// ============================================================
+document.querySelectorAll('.prop-section-title').forEach(title => {
+  const body = title.nextElementSibling;
+  if (!body || !body.classList.contains('prop-section-body')) return;
+  // Add arrow
+  const arrow = document.createElement('span');
+  arrow.className = 'collapse-arrow';
+  arrow.textContent = '\u25BC';
+  title.prepend(arrow);
+  arrow.style.marginRight = '6px';
+  title.addEventListener('click', () => {
+    body.classList.toggle('collapsed');
+    arrow.classList.toggle('collapsed');
+  });
+});
+
+// ============================================================
+// KEYBOARD SHORTCUTS
+// ============================================================
+document.addEventListener('keydown', (e) => {
+  // Don't capture when typing in inputs
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) { e.preventDefault(); redo(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveProject(); }
+  if (e.key === 'Delete') {
+    if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
+      const name = state.plots[state.selectedPlot].name;
+      state.plots.splice(state.selectedPlot, 1);
+      if (state.selectedPlot >= state.plots.length) state.selectedPlot = state.plots.length - 1;
+      renderPlotList();
+      selectPlot(state.selectedPlot);
+      render();
+      $('status-text').textContent = `Deleted: ${name}`;
+    }
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); addPlot(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'd') { e.preventDefault(); duplicatePlot(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === '0') { e.preventDefault(); resetZoom(); }
+  if (e.key === '?') { $('shortcuts-overlay').classList.toggle('visible'); }
+  if (e.key === 'Escape') { $('shortcuts-overlay').classList.remove('visible'); }
+});
+
+// ============================================================
+// INIT
+// ============================================================
+syncStateToProps();
+renderDsSelector();
+if (!tryAutoRestore()) {
+  render();
+  $('status-text').textContent = 'Ready — Click "+ Add Plot" or press N to begin';
+}
+// Initial undo snapshot
+undoStack.push(getStateSnapshot());
