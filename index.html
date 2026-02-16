@@ -193,9 +193,12 @@ html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMa
       </div>
       <div id="plot-list"></div>
       <div id="data-section">
-        <div class="panel-header">Data</div>
+        <div class="panel-header">
+          Data Source
+          <select id="ds-selector" style="background:#1e1e1e;color:#ddd;border:1px solid #3e3e3e;border-radius:3px;font-size:11px;max-width:100px"></select>
+        </div>
         <div id="data-editor-wrap">
-          <textarea id="data-editor" placeholder="# Enter data: x y&#10;1 2&#10;2 4&#10;3 1&#10;4 5" spellcheck="false"></textarea>
+          <textarea id="data-editor" placeholder="# Enter data: x y [y2 y3 ...]&#10;1 2 3&#10;2 4 5&#10;3 1 7&#10;4 5 2" spellcheck="false"></textarea>
         </div>
       </div>
     </div>
@@ -406,39 +409,101 @@ const state = {
   key: { show: true, pos: 'top-right', box: true, fontSize: 11, horizontal: false, x: null, y: null, width: null },
   annotations: [], // [{text, x, y, fontSize, color}]
   customCommands: '',
+  dataSources: [], // [{id, name, rawData, headers, rows}]
   plots: [],
   selectedPlot: -1,
+  selectedDataSource: -1, // index into dataSources for left-panel editor
 };
 
 let plotIdCounter = 0;
+let dsIdCounter = 0;
+
+function parseDataSource(text) {
+  const lines = text.split('\n');
+  const dataLines = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    dataLines.push(trimmed);
+  }
+  if (dataLines.length === 0) return { headers: [], rows: [] };
+  const firstParts = dataLines[0].split(/[,\t\s]+/);
+  const hasHeader = firstParts.some(p => isNaN(Number(p)));
+  const startRow = hasHeader ? 1 : 0;
+  const headers = hasHeader ? firstParts : firstParts.map((_, i) => `col${i + 1}`);
+  const rows = [];
+  for (let i = startRow; i < dataLines.length; i++) {
+    const parts = dataLines[i].split(/[,\t\s]+/).map(Number);
+    if (parts.length >= 2 && parts.every(isFinite)) rows.push(parts);
+  }
+  return { headers, rows };
+}
+
+function createDataSource(name, rawData) {
+  const parsed = parseDataSource(rawData || '');
+  return {
+    id: dsIdCounter++,
+    name: name || `Data ${state.dataSources.length + 1}`,
+    rawData: rawData || '',
+    headers: parsed.headers,
+    rows: parsed.rows,
+  };
+}
+
+function getPlotData(plot) {
+  if (plot.isFunction && plot.funcExpr) {
+    return evalFunction(plot.funcExpr, plot.funcXmin, plot.funcXmax, plot.funcSamples);
+  }
+  if (plot.dataSourceId == null) return [];
+  const ds = state.dataSources.find(d => d.id === plot.dataSourceId);
+  if (!ds || ds.rows.length === 0) return [];
+  const data = [];
+  for (const row of ds.rows) {
+    if (plot.usingX < row.length && plot.usingY < row.length &&
+        isFinite(row[plot.usingX]) && isFinite(row[plot.usingY])) {
+      const pt = { x: row[plot.usingX], y: row[plot.usingY] };
+      if (plot.usingYerr != null && plot.usingYerr >= 0 && plot.usingYerr < row.length)
+        pt.yerr = row[plot.usingYerr];
+      data.push(pt);
+    }
+  }
+  return data;
+}
+
+function getDataSourceColumns(plot) {
+  if (plot.dataSourceId == null) return [];
+  const ds = state.dataSources.find(d => d.id === plot.dataSourceId);
+  return ds ? ds.headers : [];
+}
 
 function createPlot(name) {
   return {
     id: plotIdCounter++,
     name: name || `Plot ${state.plots.length + 1}`,
-    type: 'linespoints', // lines, points, linespoints, boxes, impulses, steps, fillcurves
+    type: 'linespoints',
     color: COLORS[state.plots.length % COLORS.length],
     lineWidth: 2,
     pointSize: 4,
-    pointType: 'circle', // circle, square, triangle, diamond, cross, plus
-    dashType: 'solid', // solid, dashed, dotted, dashdot
+    pointType: 'circle',
+    dashType: 'solid',
     fillAlpha: 0.3,
-    data: [], // [{x, y}]
-    rawData: '', // text form
-    smooth: 'none', // none, csplines, bezier
+    smooth: 'none',
     visible: true,
+    // Data source reference (gnuplot-like)
+    dataSourceId: null, // references a data source by id
+    usingX: 0,         // column index for X
+    usingY: 1,         // column index for Y
+    usingYerr: null,    // column index for Y error (null = none)
     // Function plotting
     isFunction: false,
-    funcExpr: '', // e.g. "sin(x)", "x**2 + 1"
+    funcExpr: '',
     funcXmin: -10,
     funcXmax: 10,
     funcSamples: 200,
-    // Error bars
-    hasErrorBars: false, // if true, data has {x, y, yerr}
-    // Position offset & bar width
-    xOffset: 0,    // shift all x values by this amount (data units)
-    barWidth: 0,   // 0 = auto, otherwise explicit width in data units
-    offsetLocked: false, // prevent drag changes to xOffset
+    hasErrorBars: false,
+    xOffset: 0,
+    barWidth: 0,
+    offsetLocked: false,
   };
 }
 
@@ -463,7 +528,7 @@ function computeDataBounds() {
     if (!p.visible) continue;
     const xOff = p.xOffset || 0;
     const halfBar = (p.barWidth || 0) / 2;
-    for (const d of p.data) {
+    for (const d of getPlotData(p)) {
       if (isFinite(d.x)) {
         xmin = Math.min(xmin, d.x + xOff - halfBar);
         xmax = Math.max(xmax, d.x + xOff + halfBar);
@@ -734,9 +799,11 @@ function render() {
 
   // Plot data
   for (const plot of state.plots) {
-    if (!plot.visible || plot.data.length === 0) continue;
+    if (!plot.visible) continue;
+    const plotData = getPlotData(plot);
+    if (plotData.length === 0) continue;
     const xOff = plot.xOffset || 0;
-    const pts = plot.data.map(d => dataToCanvas(d.x + xOff, d.y, area, bounds));
+    const pts = plotData.map(d => dataToCanvas(d.x + xOff, d.y, area, bounds));
     ctx.strokeStyle = plot.color;
     ctx.fillStyle = plot.color;
 
@@ -779,8 +846,8 @@ function render() {
       ctx.strokeStyle = plot.color;
       ctx.lineWidth = 1;
       const capW = 4;
-      for (let i = 0; i < plot.data.length; i++) {
-        const d = plot.data[i];
+      for (let i = 0; i < plotData.length; i++) {
+        const d = plotData[i];
         if (d.yerr === undefined) continue;
         const top = dataToCanvas(d.x + xOff, d.y + d.yerr, area, bounds);
         const bot = dataToCanvas(d.x + xOff, d.y - d.yerr, area, bounds);
@@ -1023,25 +1090,6 @@ function render() {
 }
 
 // ============================================================
-// DATA PARSING
-// ============================================================
-function parseData(text) {
-  const lines = text.split('\n');
-  const data = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const parts = trimmed.split(/[,\t\s]+/).map(Number);
-    if (parts.length >= 3 && isFinite(parts[0]) && isFinite(parts[1]) && isFinite(parts[2])) {
-      data.push({ x: parts[0], y: parts[1], yerr: parts[2] });
-    } else if (parts.length >= 2 && isFinite(parts[0]) && isFinite(parts[1])) {
-      data.push({ x: parts[0], y: parts[1] });
-    }
-  }
-  return data;
-}
-
-// ============================================================
 // FUNCTION EVALUATION (safe math expression)
 // ============================================================
 function evalFunction(expr, xmin, xmax, samples) {
@@ -1195,12 +1243,47 @@ $('yaxis-lock').addEventListener('click', (e) => {
   $('status-text').textContent = state.yaxis.locked ? 'Y axis range locked' : 'Y axis range unlocked';
 });
 
-// Data editor -> update selected plot
-dataEditor.addEventListener('input', () => {
+// Data source selector
+const dsSelector = $('ds-selector');
+
+function renderDsSelector() {
+  const prev = dsSelector.value;
+  dsSelector.innerHTML = state.dataSources.length === 0
+    ? '<option value="">No data</option>'
+    : state.dataSources.map((ds, i) =>
+        `<option value="${ds.id}">${ds.name.replace(/</g,'&lt;')}</option>`
+      ).join('');
+  // Auto-select the data source of the current plot
   if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
     const plot = state.plots[state.selectedPlot];
-    plot.rawData = dataEditor.value;
-    plot.data = parseData(dataEditor.value);
+    if (plot.dataSourceId != null) dsSelector.value = plot.dataSourceId;
+  }
+  showSelectedDs();
+}
+
+function showSelectedDs() {
+  const dsId = +dsSelector.value;
+  const ds = state.dataSources.find(d => d.id === dsId);
+  dataEditor.value = ds ? ds.rawData : '';
+  dataEditor.disabled = !ds;
+}
+
+dsSelector.addEventListener('change', showSelectedDs);
+
+// Data editor -> update selected data source
+dataEditor.addEventListener('input', () => {
+  const dsId = +dsSelector.value;
+  const ds = state.dataSources.find(d => d.id === dsId);
+  if (ds) {
+    ds.rawData = dataEditor.value;
+    const parsed = parseDataSource(ds.rawData);
+    ds.headers = parsed.headers;
+    ds.rows = parsed.rows;
+    // Re-render plot props if selected plot uses this data source (columns may have changed)
+    if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
+      const plot = state.plots[state.selectedPlot];
+      if (plot.dataSourceId === dsId) renderPlotProps(plot);
+    }
     render();
   }
 });
@@ -1277,10 +1360,15 @@ function selectPlot(idx) {
   renderPlotList();
   if (idx >= 0 && idx < state.plots.length) {
     const p = state.plots[idx];
-    dataEditor.value = p.rawData;
+    // Show this plot's data source in the editor
+    if (p.dataSourceId != null) {
+      dsSelector.value = p.dataSourceId;
+    }
+    showSelectedDs();
     renderPlotProps(p);
   } else {
     dataEditor.value = '';
+    dataEditor.disabled = true;
     $('plot-props-section').style.display = 'none';
   }
 }
@@ -1290,10 +1378,40 @@ function renderPlotProps(plot) {
   section.style.display = '';
   const body = $('plot-props');
   const escapedName = plot.name.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Build data source and column selector options
+  const dsOpts = state.dataSources.map(ds =>
+    `<option value="${ds.id}" ${ds.id===plot.dataSourceId?'selected':''}>${ds.name.replace(/</g,'&lt;')}</option>`
+  ).join('');
+  const cols = getDataSourceColumns(plot);
+  const colXOpts = cols.map((h, i) =>
+    `<option value="${i}" ${i===plot.usingX?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+  ).join('');
+  const colYOpts = cols.map((h, i) =>
+    `<option value="${i}" ${i===plot.usingY?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+  ).join('');
+  const colYerrOpts = `<option value="-1" ${plot.usingYerr==null||plot.usingYerr<0?'selected':''}>None</option>` +
+    cols.map((h, i) =>
+      `<option value="${i}" ${i===plot.usingYerr?'selected':''}>${i}: ${h.replace(/</g,'&lt;')}</option>`
+    ).join('');
+  const isFunc = plot.isFunction;
   body.innerHTML = `
     <div class="prop-row">
       <label>Name</label>
       <input type="text" id="pp-name" value="${escapedName}">
+    </div>
+    <div class="prop-row" ${isFunc?'style="display:none"':''}>
+      <label>Source</label>
+      <select id="pp-ds">${dsOpts}</select>
+    </div>
+    <div class="prop-row" ${isFunc?'style="display:none"':''}>
+      <label>using X</label>
+      <select id="pp-col-x">${colXOpts}</select>
+      <label style="width:auto">Y</label>
+      <select id="pp-col-y">${colYOpts}</select>
+    </div>
+    <div class="prop-row" ${isFunc?'style="display:none"':''}>
+      <label>Y Error</label>
+      <select id="pp-col-yerr">${colYerrOpts}</select>
     </div>
     <div class="prop-row">
       <label>Type</label>
@@ -1408,6 +1526,17 @@ function renderPlotProps(plot) {
 
 function syncPlotProps(plot) {
   plot.name = $('pp-name').value;
+  // Data source & column selection
+  const prevDs = plot.dataSourceId;
+  if (!plot.isFunction) {
+    const dsVal = $('pp-ds').value;
+    plot.dataSourceId = dsVal !== '' ? +dsVal : null;
+    plot.usingX = +$('pp-col-x').value;
+    plot.usingY = +$('pp-col-y').value;
+    const yerrVal = +$('pp-col-yerr').value;
+    plot.usingYerr = yerrVal >= 0 ? yerrVal : null;
+    plot.hasErrorBars = plot.usingYerr != null && plot.usingYerr >= 0;
+  }
   plot.type = $('pp-type').value;
   plot.color = $('pp-color').value;
   plot.lineWidth = +$('pp-lw').value;
@@ -1419,20 +1548,20 @@ function syncPlotProps(plot) {
   plot.barWidth = +$('pp-bw').value || 0;
   plot.visible = $('pp-vis').checked;
   plot.smooth = $('pp-smooth').value;
-  plot.hasErrorBars = $('pp-errbars').checked;
   plot.isFunction = $('pp-isfunc').checked;
   plot.funcExpr = $('pp-funcexpr').value;
   plot.funcXmin = +$('pp-fxmin').value;
   plot.funcXmax = +$('pp-fxmax').value;
   plot.funcSamples = +$('pp-fsamples').value;
-  // Enable/disable function fields
   $('pp-funcexpr').disabled = !plot.isFunction;
   $('pp-fxmin').disabled = !plot.isFunction;
   $('pp-fxmax').disabled = !plot.isFunction;
   $('pp-fsamples').disabled = !plot.isFunction;
-  // Re-evaluate function if enabled
-  if (plot.isFunction && plot.funcExpr) {
-    plot.data = evalFunction(plot.funcExpr, plot.funcXmin, plot.funcXmax, plot.funcSamples);
+  // Re-render props if data source changed (updates column selectors)
+  if (plot.dataSourceId !== prevDs) {
+    renderPlotProps(plot);
+    dsSelector.value = plot.dataSourceId;
+    showSelectedDs();
   }
   renderPlotList();
   render();
@@ -1442,11 +1571,14 @@ function syncPlotProps(plot) {
 // ADD PLOT
 // ============================================================
 function addPlot() {
+  const ds = createDataSource(null, '# x y\n1 2\n2 4\n3 3\n4 7\n5 5');
+  state.dataSources.push(ds);
   const plot = createPlot();
-  // Default sample data
-  plot.rawData = '# x y\n1 2\n2 4\n3 3\n4 7\n5 5';
-  plot.data = parseData(plot.rawData);
+  plot.dataSourceId = ds.id;
+  plot.usingX = 0;
+  plot.usingY = 1;
   state.plots.push(plot);
+  renderDsSelector();
   selectPlot(state.plots.length - 1);
   render();
   renderPlotList();
@@ -1462,7 +1594,6 @@ function addFunctionPlot() {
   plot.funcXmax = 10;
   plot.funcSamples = 200;
   plot.type = 'lines';
-  plot.data = evalFunction(plot.funcExpr, plot.funcXmin, plot.funcXmax, plot.funcSamples);
   state.plots.push(plot);
   selectPlot(state.plots.length - 1);
   render();
@@ -1482,9 +1613,9 @@ function nearDataPoint(mx, my, area) {
   const bounds = state._bounds;
   if (!bounds) return false;
   for (const plot of state.plots) {
-    if (!plot.visible || plot.data.length === 0 || plot.offsetLocked) continue;
+    if (!plot.visible || plot.offsetLocked) continue;
     const xOff = plot.xOffset || 0;
-    for (const d of plot.data) {
+    for (const d of getPlotData(plot)) {
       const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
       if (Math.hypot(cp.x - mx, cp.y - my) < 20) return true;
     }
@@ -1553,9 +1684,9 @@ canvas.addEventListener('mousedown', (e) => {
         let bestDist = 20; // max pixel distance to grab
         let bestPlot = null;
         for (const plot of state.plots) {
-          if (!plot.visible || plot.data.length === 0) continue;
+          if (!plot.visible) continue;
           const xOff = plot.xOffset || 0;
-          for (const d of plot.data) {
+          for (const d of getPlotData(plot)) {
             const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
             const dist = Math.hypot(cp.x - mx, cp.y - my);
             if (dist < bestDist) {
@@ -1831,7 +1962,7 @@ function generateGnuplotScript() {
   lines.push('');
 
   // Data + plot commands
-  const visPlots = state.plots.filter(p => p.visible && p.data.length > 0);
+  const visPlots = state.plots.filter(p => p.visible && getPlotData(p).length > 0);
   if (visPlots.length > 0) {
     const typeMap = {
       'lines': 'lines', 'points': 'points', 'linespoints': 'linespoints',
@@ -1842,7 +1973,6 @@ function generateGnuplotScript() {
     const ptMap = { 'circle': 7, 'square': 5, 'triangle': 9, 'diamond': 13, 'cross': 2, 'plus': 1 };
 
     const plotParts = [];
-    let dataIdx = 0;
 
     // Fill style for fillcurves
     const hasFill = visPlots.some(p => p.type === 'fillcurves' || p.type === 'boxes');
@@ -1853,10 +1983,29 @@ function generateGnuplotScript() {
     }
 
     // Per-plot boxwidth: if any plot uses explicit barWidth, emit set boxwidth
-    // (gnuplot only has a global boxwidth, so we use the first non-zero one)
     const firstBW = visPlots.find(p => p.type === 'boxes' && p.barWidth > 0);
     if (firstBW) {
       lines.push(`set boxwidth ${firstBW.barWidth} absolute`);
+    }
+
+    // Emit shared data source blocks (one per unique data source used)
+    const dsBlockNames = new Map(); // dsId -> block name
+    let dsIdx = 0;
+    for (const p of visPlots) {
+      if (p.isFunction || p.dataSourceId == null) continue;
+      if (dsBlockNames.has(p.dataSourceId)) continue;
+      const ds = state.dataSources.find(d => d.id === p.dataSourceId);
+      if (!ds || ds.rows.length === 0) continue;
+      const blockName = `$data${dsIdx++}`;
+      dsBlockNames.set(p.dataSourceId, blockName);
+      lines.push(`${blockName} << EOD`);
+      // Write header as comment
+      if (ds.headers.length > 0) lines.push(`# ${ds.headers.join('\t')}`);
+      for (const row of ds.rows) {
+        lines.push(row.join('\t'));
+      }
+      lines.push('EOD');
+      lines.push('');
     }
 
     visPlots.forEach((p) => {
@@ -1869,25 +2018,19 @@ function generateGnuplotScript() {
         s += ` title "${p.name}"`;
         plotParts.push(s);
       } else {
-        // Data plot — inline data
-        const idx = dataIdx++;
-        lines.push(`$data${idx} << EOD`);
-        if (p.hasErrorBars) {
-          p.data.forEach(d => lines.push(`${d.x}\t${d.y}\t${d.yerr || 0}`));
-        } else {
-          p.data.forEach(d => lines.push(`${d.x}\t${d.y}`));
-        }
-        lines.push('EOD');
-        lines.push('');
-
-        // Build the using clause with optional x offset
+        // Data plot — reference shared data block with using clause
+        const blockName = dsBlockNames.get(p.dataSourceId);
+        if (!blockName) return;
         const xOff = p.xOffset || 0;
-        const col1 = xOff !== 0 ? `($1+${xOff})` : '1';
-        let s = `$data${idx}`;
-        if (p.hasErrorBars) {
-          s += ` using ${col1}:2:3 with ${p.type === 'points' || p.type === 'linespoints' ? 'yerrorbars' : 'yerrorlines'}`;
+        const colX = p.usingX + 1; // gnuplot uses 1-indexed columns
+        const colY = p.usingY + 1;
+        const col1 = xOff !== 0 ? `($${colX}+${xOff})` : `${colX}`;
+        let s = blockName;
+        if (p.hasErrorBars && p.usingYerr != null && p.usingYerr >= 0) {
+          const colYerr = p.usingYerr + 1;
+          s += ` using ${col1}:${colY}:${colYerr} with ${p.type === 'points' || p.type === 'linespoints' ? 'yerrorbars' : 'yerrorlines'}`;
         } else {
-          s += ` using ${col1}:2 with ${typeMap[p.type] || 'lines'}`;
+          s += ` using ${col1}:${colY} with ${typeMap[p.type] || 'lines'}`;
         }
         s += ` lc rgb "${p.color}" lw ${p.lineWidth}`;
         if (p.type === 'points' || p.type === 'linespoints') {
@@ -1943,32 +2086,26 @@ function importData() {
   const text = $('import-text').value.trim();
   if (!text) return;
 
-  const lines = text.split('\n').filter(l => l.trim());
-  // Detect if first line is header
-  const firstParts = lines[0].split(/[,\t\s]+/);
-  const hasHeader = firstParts.some(p => isNaN(Number(p)));
-  const startRow = hasHeader ? 1 : 0;
-  const headers = hasHeader ? firstParts : firstParts.map((_, i) => i === 0 ? 'x' : `y${i}`);
+  // Create a single shared data source from imported text
+  const ds = createDataSource('Imported', text);
+  state.dataSources.push(ds);
 
-  // Create one plot per y column
-  for (let col = 1; col < headers.length; col++) {
-    const plot = createPlot(headers[col]);
-    const dataLines = [];
-    for (let row = startRow; row < lines.length; row++) {
-      const parts = lines[row].split(/[,\t\s]+/).map(Number);
-      if (parts.length > col && isFinite(parts[0]) && isFinite(parts[col])) {
-        plot.data.push({ x: parts[0], y: parts[col] });
-        dataLines.push(`${parts[0]} ${parts[col]}`);
-      }
-    }
-    plot.rawData = dataLines.join('\n');
+  // Create one plot per Y column, all referencing the same data source
+  const numCols = ds.headers.length;
+  for (let col = 1; col < numCols; col++) {
+    const plot = createPlot(ds.headers[col] || `col${col + 1}`);
+    plot.dataSourceId = ds.id;
+    plot.usingX = 0;
+    plot.usingY = col;
     state.plots.push(plot);
   }
+
+  renderDsSelector();
   selectPlot(state.plots.length - 1);
   renderPlotList();
   render();
   closeModal('import-modal');
-  $('status-text').textContent = `Imported ${headers.length - 1} plot(s)`;
+  $('status-text').textContent = `Imported ${numCols - 1} plot(s) from data source "${ds.name}"`;
 }
 
 function loadFile(e) {
@@ -2013,7 +2150,8 @@ function getStateSnapshot() {
     labelFontSize: state.labelFontSize,
     xaxis: {...state.xaxis}, yaxis: {...state.yaxis},
     key: {...state.key},
-    plots: state.plots.map(p => ({...p, data: [...p.data]})),
+    dataSources: state.dataSources.map(ds => ({id: ds.id, name: ds.name, rawData: ds.rawData})),
+    plots: state.plots.map(p => ({...p})),
     selectedPlot: state.selectedPlot,
   });
 }
@@ -2041,10 +2179,19 @@ function restoreSnapshot(json) {
   Object.assign(state.xaxis, s.xaxis);
   Object.assign(state.yaxis, s.yaxis);
   Object.assign(state.key, s.key);
+  if (s.dataSources) {
+    state.dataSources = s.dataSources.map(ds => {
+      const created = createDataSource(ds.name, ds.rawData);
+      created.id = ds.id;
+      return created;
+    });
+    dsIdCounter = Math.max(dsIdCounter, ...state.dataSources.map(ds => ds.id + 1));
+  }
   state.plots = s.plots;
   state.selectedPlot = s.selectedPlot;
   syncStateToProps();
   renderPlotList();
+  renderDsSelector();
   selectPlot(state.selectedPlot);
   render();
   undoSuspended = false;
@@ -2082,7 +2229,6 @@ function duplicatePlot() {
   }
   const src = state.plots[state.selectedPlot];
   const dup = {...src, id: plotIdCounter++, name: src.name + ' (copy)',
-    data: src.data.map(d => ({...d})),
     color: COLORS[(state.plots.length) % COLORS.length],
   };
   state.plots.push(dup);
@@ -2109,15 +2255,18 @@ function exportPNG() {
 // ============================================================
 function saveProject() {
   const data = {
-    version: 1,
     figure: state.figure, margin: state.margin,
     title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
     labelFontSize: state.labelFontSize,
     xaxis: state.xaxis, yaxis: state.yaxis, key: state.key,
+    dataSources: state.dataSources.map(ds => ({
+      id: ds.id, name: ds.name, rawData: ds.rawData,
+    })),
     plots: state.plots.map(p => ({
-      name: p.name, type: p.type, color: p.color,
+      id: p.id, name: p.name, type: p.type, color: p.color,
       lineWidth: p.lineWidth, pointSize: p.pointSize, pointType: p.pointType,
-      dashType: p.dashType, fillAlpha: p.fillAlpha, rawData: p.rawData, visible: p.visible,
+      dashType: p.dashType, fillAlpha: p.fillAlpha, visible: p.visible, smooth: p.smooth,
+      dataSourceId: p.dataSourceId, usingX: p.usingX, usingY: p.usingY, usingYerr: p.usingYerr,
       isFunction: p.isFunction, funcExpr: p.funcExpr, funcXmin: p.funcXmin,
       funcXmax: p.funcXmax, funcSamples: p.funcSamples, hasErrorBars: p.hasErrorBars,
       xOffset: p.xOffset, barWidth: p.barWidth, offsetLocked: p.offsetLocked,
@@ -2166,22 +2315,29 @@ function applyProjectData(data) {
   if (data.xaxis) Object.assign(state.xaxis, data.xaxis);
   if (data.yaxis) Object.assign(state.yaxis, data.yaxis);
   if (data.key) Object.assign(state.key, data.key);
+
+  if (data.dataSources) {
+    state.dataSources = data.dataSources.map(ds => {
+      const created = createDataSource(ds.name, ds.rawData);
+      created.id = ds.id;
+      return created;
+    });
+    dsIdCounter = Math.max(dsIdCounter, ...state.dataSources.map(ds => ds.id + 1));
+  }
+
   if (data.plots) {
     state.plots = data.plots.map(p => {
       const plot = createPlot(p.name);
       Object.assign(plot, p);
-      if (plot.isFunction && plot.funcExpr) {
-        plot.data = evalFunction(plot.funcExpr, plot.funcXmin, plot.funcXmax, plot.funcSamples);
-      } else {
-        plot.data = parseData(p.rawData || '');
-      }
       return plot;
     });
     plotIdCounter = Math.max(plotIdCounter, ...state.plots.map(p => p.id + 1));
   }
+
   state.selectedPlot = state.plots.length > 0 ? 0 : -1;
   syncStateToProps();
   renderPlotList();
+  renderDsSelector();
   selectPlot(state.selectedPlot);
   render();
 }
@@ -2192,7 +2348,7 @@ function tryAutoRestore() {
     const saved = localStorage.getItem('gnuplot-studio-autosave');
     if (saved) {
       const data = JSON.parse(saved);
-      if (data.plots && data.plots.length > 0) {
+      if (data.dataSources && data.plots && data.plots.length > 0) {
         applyProjectData(data);
         $('status-text').textContent = 'Restored previous session';
         return true;
@@ -2209,15 +2365,19 @@ function scheduleAutoSave() {
   autoSaveTimer = setTimeout(() => {
     try {
       const data = {
-        version: 1, figure: state.figure, margin: state.margin,
+        figure: state.figure, margin: state.margin,
         title: state.title, xlabel: state.xlabel, ylabel: state.ylabel,
         labelFontSize: state.labelFontSize,
         xaxis: state.xaxis, yaxis: state.yaxis, key: state.key,
+        dataSources: state.dataSources.map(ds => ({
+          id: ds.id, name: ds.name, rawData: ds.rawData,
+        })),
         plots: state.plots.map(p => ({
-          name: p.name, type: p.type, color: p.color,
+          id: p.id, name: p.name, type: p.type, color: p.color,
           lineWidth: p.lineWidth, pointSize: p.pointSize, pointType: p.pointType,
-          dashType: p.dashType, fillAlpha: p.fillAlpha, rawData: p.rawData, visible: p.visible,
-          smooth: p.smooth, isFunction: p.isFunction, funcExpr: p.funcExpr,
+          dashType: p.dashType, fillAlpha: p.fillAlpha, visible: p.visible, smooth: p.smooth,
+          dataSourceId: p.dataSourceId, usingX: p.usingX, usingY: p.usingY, usingYerr: p.usingYerr,
+          isFunction: p.isFunction, funcExpr: p.funcExpr,
           funcXmin: p.funcXmin, funcXmax: p.funcXmax, funcSamples: p.funcSamples,
           hasErrorBars: p.hasErrorBars, xOffset: p.xOffset, barWidth: p.barWidth, offsetLocked: p.offsetLocked,
         })),
@@ -2298,7 +2458,7 @@ canvas.addEventListener('mousemove', function tooltipHandler(e) {
   for (const plot of state.plots) {
     if (!plot.visible) continue;
     const xOff = plot.xOffset || 0;
-    for (const d of plot.data) {
+    for (const d of getPlotData(plot)) {
       const cp = dataToCanvas(d.x + xOff, d.y, area, bounds);
       const dist = Math.hypot(cp.x - mx, cp.y - my);
       if (dist < bestDist) {
@@ -2373,6 +2533,7 @@ document.addEventListener('keydown', (e) => {
 // INIT
 // ============================================================
 syncStateToProps();
+renderDsSelector();
 if (!tryAutoRestore()) {
   render();
   $('status-text').textContent = 'Ready — Click "+ Add Plot" or press N to begin';
