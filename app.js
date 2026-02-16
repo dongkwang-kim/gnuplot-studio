@@ -79,6 +79,15 @@ function getDataSourceColumns(plot) {
   return ds ? ds.headers : [];
 }
 
+// Round to significant digits based on magnitude (avoids destroying precision for small data)
+function niceRound(v) {
+  if (!isFinite(v) || v === 0) return v;
+  const mag = Math.floor(Math.log10(Math.abs(v)));
+  const digits = Math.max(0, 4 - mag); // keep ~4 significant digits
+  const factor = Math.pow(10, digits);
+  return Math.round(v * factor) / factor;
+}
+
 function createPlot(name) {
   return {
     id: plotIdCounter++,
@@ -706,7 +715,8 @@ function evalFunction(expr, xmin, xmax, samples) {
     .replace(/\btan\b/g, 'Math.tan')
     .replace(/\basin\b/g, 'Math.asin')
     .replace(/\bacos\b/g, 'Math.acos')
-    .replace(/\batan2?\b/g, 'Math.atan')
+    .replace(/\batan2\b/g, 'Math.atan2')
+    .replace(/\batan\b/g, 'Math.atan')
     .replace(/\babs\b/g, 'Math.abs')
     .replace(/\bsqrt\b/g, 'Math.sqrt')
     .replace(/\blog10\b/g, 'Math.log10')
@@ -1239,6 +1249,10 @@ function addPlotFromSource() {
     $('status-text').textContent = 'No data source selected';
     return;
   }
+  if (ds.headers.length < 2) {
+    $('status-text').textContent = 'Data source needs at least 2 columns (X and Y)';
+    return;
+  }
   const plot = createPlot();
   plot.dataSourceId = ds.id;
   plot.usingX = 0;
@@ -1441,13 +1455,13 @@ canvas.addEventListener('mousemove', (e) => {
       const dy = (my - dragStart.y) / pxPerDataY;
       if (!state.xaxis.locked) {
         state.xaxis.auto = false;
-        state.xaxis.min = Math.round(dragOriginal.xmin - dx);
-        state.xaxis.max = Math.round(dragOriginal.xmax - dx);
+        state.xaxis.min = niceRound(dragOriginal.xmin - dx);
+        state.xaxis.max = niceRound(dragOriginal.xmax - dx);
       }
       if (!state.yaxis.locked) {
         state.yaxis.auto = false;
-        state.yaxis.min = Math.round(dragOriginal.ymin + dy);
-        state.yaxis.max = Math.round(dragOriginal.ymax + dy);
+        state.yaxis.min = niceRound(dragOriginal.ymin + dy);
+        state.yaxis.max = niceRound(dragOriginal.ymax + dy);
       }
       syncStateToProps();
     }
@@ -1688,7 +1702,7 @@ function generateGnuplotScript() {
         s += ` with ${typeMap[p.type] || 'lines'}`;
         s += ` lc rgb "${p.color}" lw ${p.lineWidth}`;
         if (p.dashType !== 'solid') s += ` dt ${dashMap[p.dashType]}`;
-        s += ` title "${p.name}"`;
+        s += ` title "${p.name.replace(/"/g, '\\\\"')}"`;
         plotParts.push(s);
       } else {
         // Data plot — reference shared data block with using clause
@@ -1711,7 +1725,7 @@ function generateGnuplotScript() {
         }
         if (p.dashType !== 'solid') s += ` dt ${dashMap[p.dashType]}`;
         if (p.smooth && p.smooth !== 'none') s += ` smooth ${p.smooth}`;
-        s += ` title "${p.name}"`;
+        s += ` title "${p.name.replace(/"/g, '\\\\"')}"`;
         plotParts.push(s);
       }
     });
@@ -2116,14 +2130,14 @@ canvas.addEventListener('wheel', (e) => {
   const factor = e.deltaY > 0 ? 1.15 : 1/1.15;
   const dPos = canvasToData(mx, my, area, bounds);
 
-  // Zoom around cursor position — round to integers for cleaner range values
+  // Zoom around cursor position — round to clean values preserving precision
   // Respect axis locks
   if (state.xaxis.locked && state.yaxis.locked) return;
 
-  const newXmin = Math.round(dPos.x - (dPos.x - bounds.xmin) * factor);
-  const newXmax = Math.round(dPos.x + (bounds.xmax - dPos.x) * factor);
-  const newYmin = Math.round(dPos.y - (dPos.y - bounds.ymin) * factor);
-  const newYmax = Math.round(dPos.y + (bounds.ymax - dPos.y) * factor);
+  const newXmin = niceRound(dPos.x - (dPos.x - bounds.xmin) * factor);
+  const newXmax = niceRound(dPos.x + (bounds.xmax - dPos.x) * factor);
+  const newYmin = niceRound(dPos.y - (dPos.y - bounds.ymin) * factor);
+  const newYmax = niceRound(dPos.y + (bounds.ymax - dPos.y) * factor);
 
   if (!state.xaxis.locked) {
     state.xaxis.auto = false;
@@ -2178,7 +2192,8 @@ canvas.addEventListener('mousemove', function tooltipHandler(e) {
     const canvasArea = $('canvas-area');
     const caRect = canvasArea.getBoundingClientRect();
     tooltip.style.display = 'block';
-    tooltip.innerHTML = `<span style="color:${bestPlot.color}">${bestPlot.name}</span><br>x: ${bestPt.x}  y: ${bestPt.y}`;
+    const safeName = bestPlot.name.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    tooltip.innerHTML = `<span style="color:${bestPlot.color}">${safeName}</span><br>x: ${bestPt.x}  y: ${bestPt.y}`;
     tooltip.style.left = (e.clientX - caRect.left + 12) + 'px';
     tooltip.style.top = (e.clientY - caRect.top - 10) + 'px';
   } else {
@@ -2218,6 +2233,7 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveProject(); }
   if (e.key === 'Delete') {
     if (state.selectedPlot >= 0 && state.selectedPlot < state.plots.length) {
+      pushUndo();
       const name = state.plots[state.selectedPlot].name;
       state.plots.splice(state.selectedPlot, 1);
       if (state.selectedPlot >= state.plots.length) state.selectedPlot = state.plots.length - 1;
